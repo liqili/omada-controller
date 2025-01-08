@@ -14,6 +14,8 @@ services:
       - "29812:29812"
       - "29813:29813"
       - "29814:29814"
+    cap_add:
+      - ALL
     volumes:
       - omada-data:/opt/tplink/EAPController/data  # Persist Omada data
       - omada-logs:/opt/tplink/EAPController/logs # Persist logs
