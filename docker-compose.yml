@@ -1,0 +1,22 @@
+version: '3.5'
+
+services:
+  omada-controller:
+    build:
+      context: .  # Builds the image from the Dockerfile in the current directory
+    container_name: omada-controller
+    ports:
+      - "8088:8088"   # Omada HTTP port
+      - "8043:8043"   # Omada HTTPS port
+      - "27017:27017" # MongoDB port (for diagnostics)
+    volumes:
+      - omada-data:/opt/tplink/EAPController/data  # Persist Omada data
+      - omada-logs:/opt/tplink/EAPController/logs # Persist logs
+    environment:
+      - INSTALL_DIR=/opt/tplink/EAPController
+    restart: unless-stopped
+
+# Volumes to persist data between container restarts
+volumes:
+  omada-data:
+  omada-logs:
