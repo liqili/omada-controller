@@ -57,4 +57,4 @@ WORKDIR ${WORK_DIR}
 HEALTHCHECK --start-period=5m CMD /healthcheck.sh
 # Command to start the Omada Controller service
 # CMD ["tpeap", "start"]
-CMD ["bash", "-c", "tpeap start && tail -f /dev/null"]
+CMD ["bash", "-c", "tpeap start && tail -f ${WORK_DIR}/logs/server.log"]
