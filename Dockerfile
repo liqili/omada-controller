@@ -53,7 +53,7 @@ RUN mv healthcheck.sh ${WORK_DIR}/healthcheck.sh && chmod +x ${WORK_DIR}/healthc
 
 RUN rm -rf ${INSTALL_DIR}
 # Expose the ports used by Omada Controller (default ports)
-EXPOSE 8088 8043 8843 29810/udp 29811 29812 29813 29814
+EXPOSE 8088 8043 8843 29810/udp 29811 29812 29813 29814 29815 29816
 
 WORKDIR ${WORK_DIR}
 

@@ -5,6 +5,11 @@ services:
     build:
       context: .  # Builds the image from the Dockerfile in the current directory
     container_name: omada-controller
+    stop_grace_period: 60s
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
     ports:
       - "8088:8088"
       - "8043:8043"
@@ -14,6 +19,8 @@ services:
       - "29812:29812"
       - "29813:29813"
       - "29814:29814"
+      - "29815:29815"
+      - "29816:29816"
     cap_add:
       - ALL
     volumes:
