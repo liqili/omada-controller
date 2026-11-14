@@ -1,0 +1,14 @@
+{
+  "name": "omada-terminal-gateway",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "WebSocket to SSH bridge for the dashboard's device terminal",
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "ssh2": "1.16.0",
+    "ws": "8.18.0"
+  }
+}

@@ -51,6 +51,10 @@ RUN ${INSTALL_DIR}/install.sh -y
 
 RUN mv healthcheck.sh ${WORK_DIR}/healthcheck.sh && chmod +x ${WORK_DIR}/healthcheck.sh
 
+# Entrypoint: clears a stale pid file and stops the controller cleanly on
+# docker stop (see the script for why).
+RUN mv docker-entrypoint.sh /usr/local/bin/omada-entrypoint.sh && chmod +x /usr/local/bin/omada-entrypoint.sh
+
 RUN rm -rf ${INSTALL_DIR}
 # Expose the ports used by Omada Controller (default ports)
 EXPOSE 8088 8043 8843 29810/udp 29811 29812 29813 29814 29815 29816
@@ -59,5 +63,4 @@ WORKDIR ${WORK_DIR}
 
 HEALTHCHECK --start-period=5m CMD ./healthcheck.sh
 # Command to start the Omada Controller service
-# CMD ["tpeap", "start"]
-CMD ["bash", "-c", "tpeap start && tail -f ${WORK_DIR}/logs/server.log"]
+CMD ["/usr/local/bin/omada-entrypoint.sh"]

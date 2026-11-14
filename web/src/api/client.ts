@@ -1,0 +1,102 @@
+import axios, { AxiosError, type AxiosInstance } from 'axios';
+import type { IoResponse } from './types';
+
+// Auth scheme verified live against controller v5.15.6.7:
+//   1. POST /api/v2/login → result {omadacId, token}. The token doubles as
+//      the session CSRF token (WebUtils.isVaildToken compares the
+//      "Csrf-Token" header against the Shiro session attribute).
+//   2. authenticated calls need:
+//        - the Shiro cookie TPOMADA_SESSIONID (browser sends it via proxy)
+//        - header "Csrf-Token: <token>"
+//        - path prefix "/{omadacId}" (LoginFilter omadacTemplate; paths
+//          without it return -1600 "Unsupported request path")
+//   3. grid endpoints paginate with currentPage/pageSize (missing → server
+//      throws "Parameter page: [-1] is illegal" → errorCode -1).
+
+const TOKEN_KEY = 'omada.token';
+const OMADAC_KEY = 'omada.omadacId';
+
+export const tokenStore = {
+  get: () => localStorage.getItem(TOKEN_KEY),
+  set: (t: string) => localStorage.setItem(TOKEN_KEY, t),
+  omadacId: () => localStorage.getItem(OMADAC_KEY),
+  setOmadacId: (id: string) => localStorage.setItem(OMADAC_KEY, id),
+  clear: () => {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(OMADAC_KEY);
+  },
+};
+
+export class OmadaApiError extends Error {
+  constructor(
+    message: string,
+    public errorCode?: number,
+    public status?: number,
+  ) {
+    super(message);
+  }
+}
+
+export const api: AxiosInstance = axios.create({
+  baseURL: '/controller-api',
+  timeout: 15000,
+  headers: { 'Content-Type': 'application/json' },
+  // The controller answers unauthenticated requests with a 302 to its own
+  // https login page — following it breaks (cert + CORS). Treat it instead
+  // as "not logged in".
+  maxRedirects: 0,
+});
+
+api.interceptors.request.use((config) => {
+  const token = tokenStore.get();
+  if (token) {
+    config.headers.set('Csrf-Token', token);
+    config.params = { ...(config.params ?? {}), token };
+  }
+  return config;
+});
+
+/** /{omadacId}/api/v2/… — every authenticated endpoint is omadac-scoped. */
+export function scoped(path: string): string {
+  const omadacId = tokenStore.omadacId();
+  const clean = path.startsWith('/') ? path : `/${path}`;
+  return omadacId ? `/${omadacId}${clean}` : clean;
+}
+
+/** Standard grid pagination params. */
+export const pageParams = (currentPage = 1, pageSize = 200) => ({ currentPage, pageSize });
+
+// -1200: session dropped by LoginFilter (re-login). -30104: bad creds.
+const RELOGIN_CODES = new Set([-1200]);
+
+/** Unwraps the controller's {errorCode, msg, result} envelope. */
+export async function unwrap<T>(promise: Promise<{ status: number; data: IoResponse<T> }>): Promise<T> {
+  try {
+    const res = await promise;
+    if (res.status === 302) {
+      tokenStore.clear();
+      window.dispatchEvent(new Event('omada:logout'));
+      throw new OmadaApiError('Not authenticated', undefined, 302);
+    }
+    const body = res.data;
+    if (body && typeof body.errorCode === 'number' && body.errorCode !== 0) {
+      if (RELOGIN_CODES.has(body.errorCode)) {
+        tokenStore.clear();
+        window.dispatchEvent(new Event('omada:logout'));
+      }
+      throw new OmadaApiError(body.msg ?? `API error ${body.errorCode}`, body.errorCode);
+    }
+    return (body?.result ?? body) as T;
+  } catch (e) {
+    const err = e as AxiosError;
+    const status = err?.response?.status;
+    if (status === 401 || status === 302) {
+      tokenStore.clear();
+      window.dispatchEvent(new Event('omada:logout'));
+    }
+    if (e instanceof OmadaApiError) throw e;
+    const msg =
+      (err?.response?.data as IoResponse | undefined)?.msg ?? err?.message ?? 'Request failed';
+    throw new OmadaApiError(msg, (err?.response?.data as IoResponse | undefined)?.errorCode, status);
+  }
+}

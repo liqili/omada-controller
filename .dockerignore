@@ -1,0 +1,6 @@
+# The controller image only needs the controller files. web/ (the dashboard,
+# ~300 MB with node_modules) has its own image and was being copied into this
+# one's build layers.
+web
+.git
+.claude

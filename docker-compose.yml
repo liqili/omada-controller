@@ -29,8 +29,42 @@ services:
     environment:
       - INSTALL_DIR=/opt/tplink/EAPController
     restart: unless-stopped
+    networks:
+      - omada-net
+
+  # Mobile-first React dashboard (web/). Serves the built SPA and
+  # reverse-proxies /controller-api/* to the controller above.
+  web-ui:
+    build:
+      context: ./web
+    container_name: omada-web-ui
+    ports:
+      - "8080:80"
+    depends_on:
+      - omada-controller
+      - terminal
+    restart: unless-stopped
+    networks:
+      - omada-net
+
+  # Device terminal gateway (web/terminal/): WebSocket ⇄ SSH for the
+  # dashboard's Terminal tab. Not published — only web-ui talks to it.
+  terminal:
+    build:
+      context: ./web/terminal
+    container_name: omada-terminal
+    environment:
+      - OMADA_CONTROLLER=https://omada-controller:8043
+    depends_on:
+      - omada-controller
+    restart: unless-stopped
+    networks:
+      - omada-net
 
 # Volumes to persist data between container restarts
 volumes:
   omada-data:
   omada-logs:
+
+networks:
+  omada-net:
