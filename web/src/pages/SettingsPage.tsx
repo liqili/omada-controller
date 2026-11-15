@@ -14,6 +14,7 @@ import {
   onOff,
   useDraft,
 } from '../components/SettingsKit';
+import { BackupSection } from './BackupSection';
 
 // Controller settings — GET/PATCH controller/setting (live-verified on
 // v5.15.6.7). The PATCH must echo the whole object minus `certificate`;
@@ -291,6 +292,8 @@ export default function SettingsPage() {
           onChange={(v) => edit('firmware', { controllerNotification: v })}
         />
       </SectionCard>
+
+      <BackupSection />
 
       {dirty && bar}
       <Toast message={toast} onClose={() => setToast(null)} />
