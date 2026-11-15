@@ -39,7 +39,12 @@ services:
       context: ./web
     container_name: omada-web-ui
     ports:
-      - "8080:80"
+      - "8080:80"    # redirects to HTTPS
+      - "8443:443"
+    environment:
+      - WEB_UI_HTTPS_PORT=8443
+    volumes:
+      - web-ui-certs:/etc/nginx/certs   # HTTPS certificate, kept across updates
     depends_on:
       - omada-controller
       - terminal
@@ -65,6 +70,7 @@ services:
 volumes:
   omada-data:
   omada-logs:
+  web-ui-certs:
 
 networks:
   omada-net:

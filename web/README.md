@@ -68,7 +68,7 @@ Its optional **startup command** runs instead of the login shell, on a terminal
 plain login opens TP-Link's `EAP>` CLI — their dropbear runs it as a real shell.
 
 **With the bundled controller** (repo-root `docker-compose.yml`):
-`docker-compose up -d --build --no-deps web-ui terminal` → http://&lt;host&gt;:8080.
+`docker-compose up -d --build --no-deps web-ui terminal` → https://&lt;host&gt;:8443 (http://&lt;host&gt;:8080 redirects there).
 
 **With a controller you already run** (a NAS, another host): the controller is
 left alone; only the dashboard and terminal gateway are deployed, and they reach
@@ -80,7 +80,10 @@ cp .env.example .env        # set OMADA_CONTROLLER_URL=https://<controller-ip>:8
 docker compose -f docker-compose.standalone.yml up -d --build
 ```
 
-Then open http://&lt;host&gt;:8080 and sign in with the controller's admin account.
+Then open https://&lt;host&gt;:8443 and sign in with the controller's admin account
+(http://&lt;host&gt;:8080 redirects there). The certificate is self-signed, created on
+first start and kept on the `web-ui-certs` volume, so the browser warns once; put
+your own `tls.crt` and `tls.key` in that volume to avoid it.
 The host running the web UI must reach the controller on its HTTPS port (8043 by
 default). `OMADA_CONTROLLER_URL` is scheme, host and port only; a trailing `/`
 is dropped and anything else stops the container with a message. A hostname must

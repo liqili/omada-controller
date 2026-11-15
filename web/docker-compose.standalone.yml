@@ -7,18 +7,26 @@
 #     docker compose -f docker-compose.standalone.yml up -d --build
 #
 # or put the variables in web/.env (see .env.example). Then open
-# http://<this host>:8080 and sign in with the controller's admin account.
+# https://<this host>:8443 and sign in with the controller's admin account.
 
 services:
   web-ui:
     build:
       context: .
     ports:
+      # Plain HTTP only redirects to HTTPS.
       - "${WEB_UI_PORT:-8080}:80"
+      - "${WEB_UI_HTTPS_PORT:-8443}:443"
     environment:
+      # The host port above, for the HTTP → HTTPS redirect.
+      - WEB_UI_HTTPS_PORT=${WEB_UI_HTTPS_PORT:-8443}
       # The controller's HTTPS management address: scheme, host, port, no path.
       - OMADA_CONTROLLER_URL=${OMADA_CONTROLLER_URL:?Set OMADA_CONTROLLER_URL to your controller, e.g. https://192.168.1.10:8043}
       - TERMINAL_GATEWAY_URL=http://terminal:8091
+    volumes:
+      # The self-signed HTTPS certificate made on first start (or your own
+      # tls.crt + tls.key), kept across updates.
+      - web-ui-certs:/etc/nginx/certs
     depends_on:
       - terminal
     restart: unless-stopped
@@ -31,3 +39,6 @@ services:
     environment:
       - OMADA_CONTROLLER=${OMADA_CONTROLLER_URL}
     restart: unless-stopped
+
+volumes:
+  web-ui-certs:

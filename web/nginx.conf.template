@@ -4,9 +4,20 @@
 # are set are replaced, so nginx's own $variables are left alone. Defaults
 # (web/Dockerfile) match the bundled docker-compose.yml; set them to point
 # the UI at a controller somewhere else, e.g. https://192.168.1.10:8043.
+# Plain HTTP only sends the browser to HTTPS. WEB_UI_HTTPS_PORT is the host
+# port mapped to the container's 443 (default 8443).
 server {
     listen 80;
     server_name _;
+    return 301 https://$host:${WEB_UI_HTTPS_PORT}$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name _;
+    # Self-signed unless you mount your own (tls-cert.sh).
+    ssl_certificate /etc/nginx/certs/tls.crt;
+    ssl_certificate_key /etc/nginx/certs/tls.key;
 
     root /usr/share/nginx/html;
     index index.html;
@@ -29,12 +40,15 @@ server {
         # nginx would otherwise reject anything over 1 MB with 413.
         client_max_body_size 500m;
         proxy_send_timeout 20m;
-        # The controller marks TPOMADA_SESSIONID as Secure; we serve plain
-        # http, so drop the flag or the browser would discard the cookie
-        # (every authenticated request would then 302 back to /login).
-        # NOTE: this nginx build's tokens are "nosecure"/"nohttponly"
-        # (verified empirically — the underscore form is silently ignored).
-        proxy_cookie_flags TPOMADA_SESSIONID nosecure samesite=lax;
+        # The controller's session cookie (TPOMADA_SESSIONID, Path=/, Secure)
+        # is moved to Path=/controller-api/. The vendor UI on the same host
+        # (https://<nas>:8043) keeps its own at Path=/; browsers key cookies
+        # by name + host + path and ignore ports, so with one path the two
+        # UIs overwrote each other's session ("Your session has ended").
+        # Our requests list ours first (longer path first) and the
+        # controller reads the first one. Secure stays: we serve HTTPS.
+        proxy_cookie_path / /controller-api/;
+        proxy_cookie_flags TPOMADA_SESSIONID samesite=lax;
         # A dead session gets a 302 to https://omada.local/…/login. Browsers
         # follow redirects on their own (axios maxRedirects is Node-only), so
         # the app only saw a network error and pages hung. Answer 401 instead;
@@ -55,7 +69,8 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_cookie_flags TPOMADA_SESSIONID nosecure samesite=lax;
+        proxy_cookie_path / /controller-api/;
+        proxy_cookie_flags TPOMADA_SESSIONID samesite=lax;
         client_max_body_size 500m;
         proxy_send_timeout 20m;
         proxy_read_timeout 20m;

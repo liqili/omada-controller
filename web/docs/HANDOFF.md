@@ -90,10 +90,19 @@ browser :8080 → nginx (web/Dockerfile, nginx.conf.template)
   `/{omadacId}`. Response envelope `{errorCode, msg, result}`; `unwrap()` throws on
   non-zero errorCode; `-1200` triggers re-login.
 - Auth: `POST /api/v2/login {username,password,remember?}` → cookie
-  `TPOMADA_SESSIONID` + `result.token` (also CSRF token). nginx must strip `Secure`
-  from the cookie: this nginx build silently ignores `no_secure` — the working token
-  is **`nosecure`**:
-  `proxy_cookie_flags TPOMADA_SESSIONID nosecure samesite=lax;`
+  `TPOMADA_SESSIONID` (Path=/, Secure) + `result.token` (also CSRF token).
+  Since 2026-11-16 the UI is **HTTPS** (container 443, self-signed cert made by
+  `tls-cert.sh` into `/etc/nginx/certs` unless you mount tls.crt+tls.key; port 80
+  only 301-redirects to `https://$host:${WEB_UI_HTTPS_PORT}`), so the cookie stays
+  Secure, and nginx moves it to **`Path=/controller-api/`**
+  (`proxy_cookie_path / /controller-api/`). Why: browsers key cookies by
+  name+host+path and ignore the port, so the vendor UI on the same NAS
+  (https://10.0.0.120:8043, Path=/) and ours overwrote each other — and over plain
+  HTTP Chrome refuses to replace a Secure cookie at all, so after signing in to the
+  vendor UI ours could not sign in ("-1200 Your session has ended") until cookies
+  were cleared. Now both are kept; ours is sent first (longer path) and the
+  controller reads the first. (Old HTTP setup used `proxy_cookie_flags … nosecure`;
+  this nginx build ignores the `no_secure` spelling.)
 - State: TanStack Query (`web/src/hooks/queries.ts`), site context
   (`useSiteContext`), theme/shell (`layout/AppShell.tsx`, MUI v5, drawer on mobile).
 - Vite dev proxy mirrors the same `/controller-api` convention (`web/vite.config.ts`);
@@ -415,7 +424,7 @@ it — the earlier guesses in the UI were wrong and are fixed:
 
 - [ ] `npm run build` clean (tsc + vite)
 - [ ] `docker-compose up -d --build --no-deps web-ui` → `curl http://localhost:8080/` 200, login page serves
-- [ ] Login via :8080 proxy sets non-Secure session cookie, subsequent GETs 200
+- [ ] Login via https://…:8443 sets a Secure session cookie with Path=/controller-api/, subsequent GETs 200; http://…:8080 redirects to it
 - [ ] Every enabled nav page renders without uncaught console errors against live API
 - [ ] Write paths verified change→confirm→revert (never leave test SSID/name behind)
 - [ ] `git status`: `docker-compose.yml` has pre-existing local modifications unrelated to this task
