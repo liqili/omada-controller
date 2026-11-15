@@ -1,16 +1,18 @@
-import { api, pageParams, scoped, unwrap } from '../client';
+import { api, getAllPages, scoped, unwrap } from '../client';
 import type { Client } from '../types';
 
-// Probed against v5.15.6.7 (no clients attached yet — keep tolerant):
-//   GET  sites/{siteId}/clients          → -1 today (no client service data)
+//   GET  sites/{siteId}/clients?currentPage&currentPageSize&filters.active=true
+//        → grid {totalRows, currentPage, currentSize, data: ActiveClientVO[]}
+//        (the legacy Clients page's request; with `pageSize` instead of
+//        currentPageSize the controller answered -1)
 //   GET  sites/{siteId}/clients/{mac}   → -41011 when mac unknown
 //   POST sites/{siteId}/cmd/clients/{mac}/{block|unblock|forget|auth|unauth}
 //   GET  dashboard/client/overview       → 200 counts (verified)
 export async function listActiveClients(siteId: string): Promise<Client[]> {
-  const data = await unwrap<Client[]>(
-    api.get(scoped(`/api/v2/sites/${siteId}/clients`), { params: pageParams(1, 200) }),
-  ).catch(() => [] as Client[]);
-  return Array.isArray(data) ? data : [];
+  const grid = await getAllPages<{ data?: Client[] } | Client[]>(scoped(`/api/v2/sites/${siteId}/clients`), {
+    'filters.active': true,
+  });
+  return Array.isArray(grid) ? grid : grid?.data ?? [];
 }
 
 export async function getClient(siteId: string, mac: string): Promise<Client | undefined> {

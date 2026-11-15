@@ -1,12 +1,13 @@
-import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import { listSites, createSite } from '../api/domains/site';
 import {
   listDevices,
   getPendingDeviceGrid,
   getDevice,
   getOverview,
-  addDevice,
   adoptDevices,
+  type AdoptTarget,
+  type DeviceAccount,
   forgetDevice,
   deviceCmd,
   type DeviceCommand,
@@ -53,6 +54,14 @@ import {
   manualUpgrade,
   type ApConfigSection,
 } from '../api/domains/ap';
+import {
+  getConfigFeatures,
+  listConfigComponents,
+  listConfigResultDevices,
+  reapplyDeviceConfig,
+  type ConfigResultQuery,
+  type ConfigStatus,
+} from '../api/domains/configResult';
 import type { Device } from '../api/types';
 import { deviceStatus } from '../components/StatusChip';
 
@@ -129,10 +138,10 @@ export function usePendingDevices() {
   });
 }
 
-export function useDevice(_siteId: string | undefined, mac: string | undefined) {
+export function useDevice(siteId: string | undefined, mac: string | undefined) {
   return useQuery({
     queryKey: ['device', mac],
-    queryFn: () => (mac ? getDevice(mac) : undefined),
+    queryFn: () => (mac ? getDevice(siteId, mac) : undefined),
     enabled: Boolean(mac),
     refetchInterval: (q) => devicePoll(q.state.data ? [q.state.data] : []),
   });
@@ -149,21 +158,15 @@ export function useClients(siteId: string | undefined) {
 
 // — mutations (device adoption / actions, clients) —
 
-export function useAdoptDevice(siteId: string | undefined) {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { mac: string; name?: string }) =>
-      siteId ? addDevice(siteId, input) : Promise.reject(new Error('no site selected')),
-    onSuccess: () => deviceChanged(qc),
-  });
-}
-
+/** Adopt pending devices; `siteId` in the input overrides the current site (Add dialog's target). */
 export function useAdoptMany(siteId: string | undefined) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (macs: string[]) =>
-      siteId ? adoptDevices(siteId, macs) : Promise.reject(new Error('no site selected')),
-    onSuccess: () => deviceChanged(qc),
+    mutationFn: ({ devices, account, siteId: target }: { devices: AdoptTarget[]; account?: DeviceAccount; siteId?: string }) =>
+      target ?? siteId ? adoptDevices((target ?? siteId)!, devices, account) : Promise.reject(new Error('no site selected')),
+    // Also on failure: a refused adopt moves the device to "Adopt failed"
+    // (the vendor UI refreshes the row from the error's result).
+    onSettled: () => deviceChanged(qc),
   });
 }
 
@@ -179,8 +182,8 @@ export function useForgetDevice(siteId: string | undefined) {
 export function useDeviceCmd(siteId: string | undefined) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ mac, cmd }: { mac: string; cmd: DeviceCommand }) =>
-      siteId ? deviceCmd(siteId, mac, cmd) : Promise.reject(new Error('no site selected')),
+    mutationFn: ({ mac, cmd, enable }: { mac: string; cmd: DeviceCommand; enable?: boolean }) =>
+      siteId ? deviceCmd(siteId, mac, cmd, enable) : Promise.reject(new Error('no site selected')),
     onSuccess: (_r, { mac }) => deviceChanged(qc, mac),
   });
 }
@@ -487,5 +490,53 @@ export function useManualUpgrade(siteId: string | undefined, device: { mac: stri
     mutationFn: ({ file, onProgress }: { file: File; onProgress?: (f: number) => void }) =>
       siteId && device ? manualUpgrade(siteId, device, file, onProgress) : Promise.reject(new Error('no device selected')),
     onSuccess: () => firmwareChanged(qc, siteId, device?.mac),
+  });
+}
+
+// ── Configuration results (Devices → Configuration Results) ─────────────────
+
+export function useConfigResultDevices(siteId: string | undefined, query: ConfigResultQuery) {
+  return useQuery({
+    queryKey: ['configResult', 'devices', siteId, query],
+    queryFn: () => listConfigResultDevices(siteId!, query),
+    enabled: Boolean(siteId),
+    placeholderData: keepPreviousData,
+    refetchInterval: POLL,
+    retry: false,
+  });
+}
+
+export function useConfigFeatures(
+  siteId: string | undefined,
+  device: { mac: string; type?: string } | undefined,
+  status: ConfigStatus,
+) {
+  return useQuery({
+    queryKey: ['configResult', 'features', siteId, device?.mac, status],
+    queryFn: () => getConfigFeatures(siteId!, device!.mac, { status, deviceType: device?.type }),
+    enabled: Boolean(siteId && device),
+    retry: false,
+  });
+}
+
+export function useConfigComponents(
+  siteId: string | undefined,
+  mac: string | undefined,
+  q: { feature: string; status: ConfigStatus; page: number; pageSize: number } | undefined,
+) {
+  return useQuery({
+    queryKey: ['configResult', 'components', siteId, mac, q],
+    queryFn: () => listConfigComponents(siteId!, mac!, q!),
+    enabled: Boolean(siteId && mac && q),
+    placeholderData: keepPreviousData,
+    retry: false,
+  });
+}
+
+export function useReapplyConfig(siteId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (mac: string) => (siteId ? reapplyDeviceConfig(siteId, mac) : Promise.reject(new Error('no site selected'))),
+    onSettled: () => qc.invalidateQueries({ queryKey: ['configResult'] }),
   });
 }

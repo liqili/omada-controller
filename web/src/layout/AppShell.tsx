@@ -1,8 +1,9 @@
-import { useState, type ReactNode } from 'react';
+import { Suspense, useState, type ReactNode } from 'react';
 import {
   AppBar,
   Box,
   Chip,
+  CircularProgress,
   Divider,
   Drawer,
   IconButton,
@@ -216,7 +217,10 @@ export function AppShell() {
         sx={{ flexGrow: 1, minWidth: 0, p: { xs: 1.5, sm: 3 }, width: { md: `calc(100% - ${DRAWER_WIDTH}px)` } }}
       >
         <Toolbar />
-        <Outlet />
+        {/* Pages are lazy-loaded (App.tsx): the shell stays while one downloads. */}
+        <Suspense fallback={<CircularProgress sx={{ display: 'block', mx: 'auto', mt: 4 }} />}>
+          <Outlet />
+        </Suspense>
       </Box>
     </Box>
   );

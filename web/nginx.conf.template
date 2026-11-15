@@ -1,3 +1,9 @@
+# nginx template: the image's entrypoint fills in ${OMADA_CONTROLLER_URL} and
+# ${TERMINAL_GATEWAY_URL} from the container's environment at startup and
+# writes the result to /etc/nginx/conf.d/default.conf. Only variables that
+# are set are replaced, so nginx's own $variables are left alone. Defaults
+# (web/Dockerfile) match the bundled docker-compose.yml; set them to point
+# the UI at a controller somewhere else, e.g. https://192.168.1.10:8043.
 server {
     listen 80;
     server_name _;
@@ -7,8 +13,10 @@ server {
 
     # Reverse proxy to the Omada controller. Solves CORS and self-signed
     # cert trust: the browser only ever talks to this origin over http.
+    # The address is resolved once at startup, so a hostname must resolve
+    # then (an IP address always works).
     location /controller-api/ {
-        proxy_pass https://omada-controller:8043/;
+        proxy_pass ${OMADA_CONTROLLER_URL}/;
         proxy_ssl_verify off;
         proxy_http_version 1.1;
         proxy_set_header Host omada.local;
@@ -36,10 +44,11 @@ server {
     }
 
     # The restore upload itself: same proxy, longer read timeout.
-    location ~ ^/controller-api/(?<restore_path>[^/]+/api/v2/(anon/)?files/(qs/)?restore)$ {
-        # A variable in proxy_pass resolves the host per request (Docker DNS).
-        resolver 127.0.0.11 valid=30s ipv6=off;
-        proxy_pass https://omada-controller:8043/$restore_path$is_args$args;
+    location ~ ^/controller-api/[^/]+/api/v2/(anon/)?files/(qs/)?restore$ {
+        # Strip the prefix here; proxy_pass without a path then keeps the
+        # rewritten URI and query string, with no runtime DNS lookup.
+        rewrite ^/controller-api/(.*)$ /$1 break;
+        proxy_pass ${OMADA_CONTROLLER_URL};
         proxy_ssl_verify off;
         proxy_http_version 1.1;
         proxy_set_header Host omada.local;
@@ -65,7 +74,7 @@ server {
         # Resolve at request time (Docker DNS), so nginx still starts when the
         # gateway container is missing — the terminal just reports an error.
         resolver 127.0.0.11 valid=30s ipv6=off;
-        set $terminal_gateway http://omada-terminal:8091;
+        set $terminal_gateway ${TERMINAL_GATEWAY_URL};
         proxy_pass $terminal_gateway;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;

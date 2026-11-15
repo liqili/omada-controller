@@ -1,4 +1,5 @@
 import { api, scoped, unwrap } from '../client';
+import { fileMd5 } from '../md5';
 
 // Per-device settings and firmware. Paths and bodies come from the vendor SPA
 // (ap_settings/configuration, access_points/device_index, v5.15.6.7) and the
@@ -18,7 +19,7 @@ import { api, scoped, unwrap } from '../client';
 //   GET  sites/{sid}/devices/{mac}/onlineUpgrade/status      → {status} (0 = idle)
 //   POST sites/{sid}/cmd/devices/{mac}/onlineUpgrade         {mac}
 //   POST sites/{sid}/cmd/devices/checkFirmware               {mac:[mac]}   (before a manual upload)
-//   POST files/sites/{sid}/device/upgrade   multipart "file" → {fileId}
+//   POST files/sites/{sid}/device/upgrade   multipart data={md5} [+ file] → {fileId} (see manualUpgrade)
 //   DELETE files/sites/{sid}/device/upgrade/{fileId}
 //   POST sites/{sid}/cmd/devices/upgrade    {fileId, macs:[mac], type, isSingle:true} → {upgradeId}
 
@@ -110,11 +111,25 @@ export interface ApDetail {
   [k: string]: unknown;
 }
 
+/**
+ * One entry of channelInfo's channelList. `value` is what radioSetting.channel
+ * stores and what the legacy Config tab uses as the option value; it is NOT
+ * the channel number (`channelValue`, e.g. 36). `channelName` is the label,
+ * e.g. "36 / 5180MHz". value 0 / "0" is Auto.
+ */
 export interface ChannelOption {
+  value?: number | string;
   channelValue: number;
   channelName?: string;
   freq?: number;
+  widthFlag?: number;
+  dfs?: number;
+  limit?: number;
+  maxPow?: number;
 }
+
+/** The value radioSetting.channel holds for this option (legacy: item.value). */
+export const channelOptionValue = (c: ChannelOption) => String(c.value ?? c.channelValue);
 
 const eap = (siteId: string, mac: string, rest = '') => scoped(`/api/v2/sites/${siteId}/eaps/${mac}${rest}`);
 
@@ -167,7 +182,16 @@ export async function startOnlineUpgrade(siteId: string, mac: string): Promise<v
   await unwrap<unknown>(api.post(scoped(`/api/v2/sites/${siteId}/cmd/devices/${mac}/onlineUpgrade`), { mac }));
 }
 
-/** Upload a .bin for one device and start the upgrade. Returns the upgrade id. */
+/**
+ * Upload a .bin for one device and start the upgrade. Returns the upgrade id.
+ *
+ * The upload is the vendor SPA's two-step one (su Proxy.upload with
+ * resultFileIdName, found 2026-11-15 — a bare multipart file fails on a real
+ * controller). Both POSTs go to files/sites/{sid}/device/upgrade as multipart:
+ *   1. data={"md5":…} only — if the controller already holds that file it
+ *      answers with {fileId} and nothing is sent;
+ *   2. otherwise data={"md5":…} plus file.
+ */
 export async function manualUpgrade(
   siteId: string,
   device: { mac: string; type?: string },
@@ -175,18 +199,30 @@ export async function manualUpgrade(
   onProgress?: (fraction: number) => void,
 ): Promise<string | undefined> {
   await unwrap<unknown>(api.post(scoped(`/api/v2/sites/${siteId}/cmd/devices/checkFirmware`), { mac: [device.mac] }));
-  const form = new FormData();
-  form.append('file', file, file.name);
-  const uploaded = await unwrap<{ fileId?: string }>(
-    api.post(scoped(`/api/v2/files/sites/${siteId}/device/upgrade`), form, {
-      timeout: 3_600_000,
-      // The client defaults to JSON, and axios would then serialise the
-      // FormData as JSON. Naming multipart makes it send the form as-is
-      // (the browser fills in the boundary).
-      headers: { 'Content-Type': 'multipart/form-data' },
-      onUploadProgress: (e) => e.total && onProgress?.(e.loaded / e.total),
-    }),
-  );
+  const url = scoped(`/api/v2/files/sites/${siteId}/device/upgrade`);
+  const data = JSON.stringify({ md5: await fileMd5(file) });
+  const form = (withFile: boolean) => {
+    const f = new FormData();
+    f.append('data', data);
+    if (withFile) f.append('file', file, file.name);
+    return f;
+  };
+  // The client defaults to JSON, and axios would then serialise the FormData
+  // as JSON. Naming multipart makes it send the form as-is (the browser fills
+  // in the boundary).
+  const multipart = { headers: { 'Content-Type': 'multipart/form-data' } };
+  let uploaded = await unwrap<{ fileId?: string } | undefined>(api.post(url, form(false), multipart));
+  if (!uploaded?.fileId) {
+    uploaded = await unwrap<{ fileId?: string }>(
+      api.post(url, form(true), {
+        ...multipart,
+        timeout: 3_600_000,
+        onUploadProgress: (e) => e.total && onProgress?.(e.loaded / e.total),
+      }),
+    );
+  } else {
+    onProgress?.(1);
+  }
   if (!uploaded?.fileId) throw new Error('The controller did not accept the file.');
   try {
     const r = await unwrap<{ upgradeId?: string }>(

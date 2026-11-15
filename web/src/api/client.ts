@@ -10,8 +10,9 @@ import type { IoResponse } from './types';
 //        - header "Csrf-Token: <token>"
 //        - path prefix "/{omadacId}" (LoginFilter omadacTemplate; paths
 //          without it return -1600 "Unsupported request path")
-//   3. grid endpoints paginate with currentPage/pageSize (missing → server
-//      throws "Parameter page: [-1] is illegal" → errorCode -1).
+//   3. grid endpoints paginate with currentPage/currentPageSize (missing →
+//      server throws "Parameter page: [-1] is illegal" → errorCode -1;
+//      `pageSize` is NOT read — the page then defaults to 10 rows).
 
 const TOKEN_KEY = 'omada.token';
 const OMADAC_KEY = 'omada.omadacId';
@@ -49,10 +50,10 @@ export const api: AxiosInstance = axios.create({
 
 api.interceptors.request.use((config) => {
   const token = tokenStore.get();
-  if (token) {
-    config.headers.set('Csrf-Token', token);
-    config.params = { ...(config.params ?? {}), token };
-  }
+  // Header only, as the vendor UI sends it: the controller checks Csrf-Token
+  // against the session; a ?token= copy would just leak the session token
+  // into proxy logs and URLs (removed 2026-11-15).
+  if (token) config.headers.set('Csrf-Token', token);
   return config;
 });
 
@@ -63,8 +64,35 @@ export function scoped(path: string): string {
   return omadacId ? `/${omadacId}${clean}` : clean;
 }
 
-/** Standard grid pagination params. */
-export const pageParams = (currentPage = 1, pageSize = 200) => ({ currentPage, pageSize });
+/**
+ * Grid pagination params, named as the legacy UI sends them. The controller
+ * reads `currentPageSize`; an unknown `pageSize` is ignored and the page
+ * silently falls back to 10 rows (response `currentSize: 10`).
+ */
+export const PAGE_SIZE = 100;
+export const pageParams = (currentPage = 1, currentPageSize = PAGE_SIZE) => ({ currentPage, currentPageSize });
+
+/** Most pages getAllPages will follow (100 rows each). */
+const MAX_PAGES = 50;
+
+/**
+ * GET a grid endpoint and follow `currentPage` until `totalRows` are in, so a
+ * list never stops at the first page. A non-grid result (a plain array or
+ * object without `data`) is returned unchanged.
+ */
+export async function getAllPages<R = unknown>(url: string, params: Record<string, unknown> = {}): Promise<R> {
+  const first = await unwrap<unknown>(api.get(url, { params: { ...params, ...pageParams(1) } }));
+  const grid = first as { data?: unknown[]; totalRows?: number } | undefined;
+  if (!grid || Array.isArray(grid) || !Array.isArray(grid.data)) return first as R;
+  const data = [...grid.data];
+  const total = typeof grid.totalRows === 'number' ? grid.totalRows : data.length;
+  for (let page = 2; data.length < total && page <= MAX_PAGES; page++) {
+    const next = await unwrap<{ data?: unknown[] }>(api.get(url, { params: { ...params, ...pageParams(page) } }));
+    if (!next?.data?.length) break;
+    data.push(...next.data);
+  }
+  return { ...grid, data } as R;
+}
 
 // -1200: session dropped by LoginFilter (re-login). -30104: bad creds.
 const RELOGIN_CODES = new Set([-1200]);

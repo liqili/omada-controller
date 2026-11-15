@@ -35,5 +35,18 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    rollupOptions: {
+      output: {
+        // Libraries in their own long-lived chunks: an app-only redeploy
+        // leaves them cached. Pages split themselves via lazy() in App.tsx.
+        manualChunks(id) {
+          if (!id.includes('node_modules')) return undefined;
+          if (/[\\/]node_modules[\\/](@mui|@emotion|@popperjs|react-transition-group)[\\/]/.test(id)) return 'mui';
+          if (/[\\/]node_modules[\\/](react|react-dom|react-router|react-router-dom|@remix-run|scheduler)[\\/]/.test(id)) return 'react';
+          if (/[\\/]node_modules[\\/]@tanstack[\\/]/.test(id)) return 'query';
+          return undefined;
+        },
+      },
+    },
   },
 });

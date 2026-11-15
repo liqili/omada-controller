@@ -16,7 +16,6 @@ const transport = CONTROLLER.protocol === 'https:' ? https : http;
 function controllerGet(path, { cookie, token }) {
   return new Promise((resolve, reject) => {
     const url = new URL(path, CONTROLLER);
-    url.searchParams.set('token', token);
     const req = transport.request(
       url,
       {

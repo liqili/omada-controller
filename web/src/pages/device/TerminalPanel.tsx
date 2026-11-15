@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Box, Button, Chip, Stack, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, Stack, TextField, Typography } from '@mui/material';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
@@ -12,11 +12,33 @@ import type { Device } from '../../api/types';
 
 type State = 'idle' | 'connecting' | 'open' | 'closed';
 
+// The startup command is remembered per model in this browser (e.g. "sh" for
+// every F65); a convenience only, so storage failures are ignored.
+const commandKey = (device: Device) => `terminal.command.${device.model ?? device.showModel ?? device.mac}`;
+function loadCommand(device: Device): string {
+  try {
+    return localStorage.getItem(commandKey(device)) ?? '';
+  } catch {
+    return '';
+  }
+}
+function saveCommand(device: Device, command: string) {
+  try {
+    if (command) localStorage.setItem(commandKey(device), command);
+    else localStorage.removeItem(commandKey(device));
+  } catch {
+    /* private mode / blocked storage */
+  }
+}
+
 export default function TerminalPanel({ siteId, device, connected }: { siteId: string; device: Device; connected: boolean }) {
   const host = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<State>('idle');
   const [error, setError] = useState<string | null>(null);
   const [session, setSession] = useState(0);
+  const [command, setCommand] = useState(() => loadCommand(device));
+  // The command a session started with; edits apply on the next connect.
+  const startCommand = useRef('');
 
   useEffect(() => {
     if (session === 0 || !host.current) return;
@@ -48,6 +70,7 @@ export default function TerminalPanel({ siteId, device, connected }: { siteId: s
           mac: device.mac,
           cols: term.cols,
           rows: term.rows,
+          ...(startCommand.current ? { command: startCommand.current } : {}),
         }),
       );
     ws.onmessage = (ev) => {
@@ -80,6 +103,12 @@ export default function TerminalPanel({ siteId, device, connected }: { siteId: s
   }, [session, siteId, device.mac]);
 
   const running = state === 'connecting' || state === 'open';
+  const connect = () => {
+    const cmd = command.trim();
+    startCommand.current = cmd;
+    saveCommand(device, cmd);
+    setSession((n) => n + 1);
+  };
   return (
     <Stack spacing={1.5}>
       <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
@@ -98,7 +127,7 @@ export default function TerminalPanel({ siteId, device, connected }: { siteId: s
           size="small"
           variant={running ? 'outlined' : 'contained'}
           disabled={!connected && !running}
-          onClick={() => (running ? setSession(0) : setSession((n) => n + 1))}
+          onClick={() => (running ? setSession(0) : connect())}
         >
           {running ? 'Disconnect' : state === 'closed' ? 'Reconnect' : 'Connect'}
         </Button>
@@ -106,6 +135,20 @@ export default function TerminalPanel({ siteId, device, connected }: { siteId: s
       <Typography variant="body2" color="text.secondary">
         Signs in with the site’s device account. SSH must be on for the site (Services → SSH).
       </Typography>
+      <TextField
+        size="small"
+        label="Startup command (optional)"
+        placeholder="sh"
+        value={command}
+        onChange={(e) => setCommand(e.target.value.replace(/[\r\n]/g, ''))}
+        onKeyDown={(e) => e.key === 'Enter' && !running && connected && connect()}
+        disabled={running}
+        inputProps={{ maxLength: 256, spellCheck: false, style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace' } }}
+        helperText={
+          'Runs instead of the login shell, on a terminal — like ssh -t device <command>. ' +
+          'Use sh on EAPs whose login opens the EAP> CLI (e.g. F65). Remembered for this model.'
+        }
+      />
       {!connected && state === 'idle' && <Alert severity="info">The device must be connected to open a terminal.</Alert>}
       {error && state === 'closed' && <Alert severity="error">{error}</Alert>}
       <Box

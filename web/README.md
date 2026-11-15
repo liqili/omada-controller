@@ -24,7 +24,8 @@ React 18 · TypeScript · Vite · MUI v5 · React Router v6 · TanStack Query v5
 | `sim/` | device simulator (`omada-sim.mjs`) and its end-to-end scenario (`scenario.mjs`) |
 | `terminal/` | WebSocket ⇄ SSH gateway behind the device page's Terminal tab (own container) |
 | `docs/HANDOFF.md` | live-verified endpoint/verb table, current state, open items |
-| `nginx.conf` + `Dockerfile` | static serving + `/controller-api` reverse proxy |
+| `nginx.conf.template` + `Dockerfile` | static serving + `/controller-api` reverse proxy; controller address from `OMADA_CONTROLLER_URL` |
+| `docker-compose.standalone.yml` | web UI + terminal gateway alone, for a controller that already runs elsewhere |
 
 ## Dev
 
@@ -58,11 +59,33 @@ database. Details in `docs/HANDOFF.md` §6.
 
 ## Deployment
 
-`docker-compose up -d --build --no-deps web-ui terminal` → http://&lt;host&gt;:8080 — the nginx sidecar
-proxies `/controller-api/*` to `https://omada-controller:8043`, so the browser
-never deals with CORS or the self-signed cert, and `/terminal/ws` to the
-terminal gateway. The device terminal signs in with the site's device account
-and needs SSH turned on for the site (Services → SSH).
+The web-ui container's nginx serves the dashboard and proxies `/controller-api/*`
+to the controller, so the browser never deals with CORS or the self-signed cert,
+and `/terminal/ws` to the terminal gateway. The device terminal signs in with the
+site's device account and needs SSH turned on for the site (Services → SSH).
+Its optional **startup command** runs instead of the login shell, on a terminal
+(`ssh -t admin@<device-ip> <command>`): enter `sh` for EAPs such as the F65 whose
+plain login opens TP-Link's `EAP>` CLI — their dropbear runs it as a real shell.
+
+**With the bundled controller** (repo-root `docker-compose.yml`):
+`docker-compose up -d --build --no-deps web-ui terminal` → http://&lt;host&gt;:8080.
+
+**With a controller you already run** (a NAS, another host): the controller is
+left alone; only the dashboard and terminal gateway are deployed, and they reach
+the controller at its HTTPS management address.
+
+```bash
+cd web
+cp .env.example .env        # set OMADA_CONTROLLER_URL=https://<controller-ip>:8043
+docker compose -f docker-compose.standalone.yml up -d --build
+```
+
+Then open http://&lt;host&gt;:8080 and sign in with the controller's admin account.
+The host running the web UI must reach the controller on its HTTPS port (8043 by
+default). `OMADA_CONTROLLER_URL` is scheme, host and port only; a trailing `/`
+is dropped and anything else stops the container with a message. A hostname must
+resolve when the container starts (an IP address always works). The UI was
+built and verified against controller 5.15.6.7.
 
 ## Roadmap
 

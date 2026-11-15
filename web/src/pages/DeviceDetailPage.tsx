@@ -12,7 +12,6 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
-  Divider,
   Stack,
   Tab,
   Tabs,
@@ -21,25 +20,17 @@ import {
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useDevice, useDeviceCmd, useForgetDevice } from '../hooks/queries';
 import { useSite } from '../hooks/useSiteContext';
-import { DeviceStatusChip, deviceStatus } from '../components/StatusChip';
-import { Fact, Toast, apiErrorText } from '../components/SettingsKit';
+import { DeviceStatusChip, deviceCommandable, deviceStatus } from '../components/StatusChip';
+import { Fact, SectionCard, Toast, apiErrorText } from '../components/SettingsKit';
 import type { DeviceCommand } from '../api/domains/device';
+import { DetailSections, RadioUtilization } from './device/DetailSections';
 
 // Loaded on first use: the terminal pulls in xterm.js (~300 kB).
 const ApConfigPanel = lazy(() => import('./device/ApConfigPanel'));
 const FirmwarePanel = lazy(() => import('./device/FirmwarePanel'));
 const TerminalPanel = lazy(() => import('./device/TerminalPanel'));
 
-type TabKey = 'overview' | 'config' | 'firmware' | 'terminal';
-
-function formatUptime(seconds?: number): string {
-  if (seconds === undefined) return '—';
-  if (seconds < 60) return '<1m';
-  const d = Math.floor(seconds / 86400);
-  const h = Math.floor((seconds % 86400) / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${m}m`;
-}
+type TabKey = 'overview' | 'config' | 'advanced' | 'terminal';
 
 const COMMAND_LABEL: Record<DeviceCommand, string> = {
   forceProvision: 'Provision requested',
@@ -63,21 +54,19 @@ export default function DeviceDetailPage() {
   if (!device) return <Alert severity="info">Device not found.</Alert>;
 
   const state = deviceStatus(device.status, device.statusCategory);
-  // Commands only make sense on a device that is up and not mid-transition
-  // (rebooting / provisioning / configuring count as "connected" upstream).
-  const connected =
-    !state.transient && (device.statusCategory === 1 || (device.status >= 14 && device.status <= 17));
+  const connected = deviceCommandable(device);
   const run = (c: DeviceCommand) =>
     cmd.mutate({ mac: device.mac, cmd: c }, { onSuccess: () => setToast(COMMAND_LABEL[c]) });
   const broadcast = device.simBroadcast;
   const isAp = device.type === 'ap';
   const tabs: { key: TabKey; label: string }[] = [
-    { key: 'overview', label: 'Overview' },
+    { key: 'overview', label: 'Details' },
     ...(isAp ? [{ key: 'config' as const, label: 'Configuration' }] : []),
-    { key: 'firmware', label: 'Firmware' },
+    { key: 'advanced', label: 'Advanced' },
     { key: 'terminal', label: 'Terminal' },
   ];
-  const requested = params.get('tab') as TabKey | null;
+  // ?tab=firmware is the Advanced tab's old name; keep old links working.
+  const requested = (params.get('tab') === 'firmware' ? 'advanced' : params.get('tab')) as TabKey | null;
   const tab: TabKey = tabs.some((t) => t.key === requested) ? requested! : 'overview';
   // Config edits are allowed for any adopted AP, even offline: the
   // controller pushes them when it reconnects. Pending devices have none.
@@ -96,33 +85,17 @@ export default function DeviceDetailPage() {
               {device.simulated && <Chip size="small" color="secondary" label="Simulated" />}
               {state.transient && <CircularProgress size={16} />}
             </Stack>
-            <Divider />
-            <Fact label="MAC">{device.mac}</Fact>
-            <Fact label="Type">{device.type}</Fact>
-            <Fact label="Model">{device.showModel ?? device.model ?? '—'}</Fact>
-            <Fact label="IP">{device.ip ?? '—'}</Fact>
-            <Fact label="Firmware">{device.firmwareVersion ?? device.version ?? '—'}</Fact>
-            <Fact label="Uptime">{formatUptime(device.uptime)}</Fact>
-            {device.clientNum !== undefined && <Fact label="Clients">{device.clientNum}</Fact>}
+            <Typography variant="body2" color="text.secondary">
+              {[device.showModel ?? device.model, device.ip, device.name && device.name !== device.mac ? device.mac : undefined]
+                .filter(Boolean)
+                .join(' · ')}
+            </Typography>
           </Stack>
-          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mt: 2 }}>
-            <Button size="small" variant="outlined" disabled={!connected || cmd.isPending} onClick={() => run('forceProvision')}>
-              Force provision
-            </Button>
-            <Button size="small" variant="outlined" disabled={!connected || cmd.isPending} onClick={() => run('locate')}>
-              Locate
-            </Button>
-            <Button size="small" variant="outlined" disabled={!connected || cmd.isPending} onClick={() => run('reboot')}>
-              Reboot
-            </Button>
-            <Button size="small" color="error" onClick={() => setConfirmForget(true)}>
-              Forget
-            </Button>
-          </Box>
-          {cmd.isError && (
-            <Alert severity="error" sx={{ mt: 1 }}>
-              {apiErrorText(cmd.error)}
-            </Alert>
+          {/* Channel utilization per radio, as at the top of the legacy drawer. */}
+          {isAp && device.statusCategory === 1 && (
+            <Box sx={{ mt: 2 }}>
+              <RadioUtilization device={device} bare />
+            </Box>
           )}
         </CardContent>
       </Card>
@@ -138,11 +111,32 @@ export default function DeviceDetailPage() {
         ))}
       </Tabs>
 
+      {/* Outside Suspense: the actions show at once while the firmware panel loads. */}
+      {tab === 'advanced' && (
+            <SectionCard title="Device actions">
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                <Button size="small" variant="outlined" disabled={!connected || cmd.isPending} onClick={() => run('forceProvision')}>
+                  Force provision
+                </Button>
+                <Button size="small" color="error" onClick={() => setConfirmForget(true)}>
+                  Forget
+                </Button>
+              </Box>
+              {cmd.isError && (
+                <Alert severity="error" sx={{ mt: 1 }}>
+                  {apiErrorText(cmd.error)}
+                </Alert>
+              )}
+            </SectionCard>
+      )}
+
       <Suspense fallback={<CircularProgress sx={{ display: 'block', mx: 'auto', my: 3 }} />}>
         {tab === 'config' && siteId && adopted && <ApConfigPanel siteId={siteId} mac={device.mac} />}
-        {tab === 'firmware' && siteId && <FirmwarePanel siteId={siteId} device={device} connected={connected} />}
+        {tab === 'advanced' && siteId && <FirmwarePanel siteId={siteId} device={device} connected={connected} />}
         {tab === 'terminal' && siteId && <TerminalPanel siteId={siteId} device={device} connected={connected} />}
       </Suspense>
+
+      {tab === 'overview' && <DetailSections device={device} connected={device.statusCategory === 1} />}
 
       {tab === 'overview' && isAp ? (
         <Card>

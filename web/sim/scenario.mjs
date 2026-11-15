@@ -10,6 +10,7 @@
 //
 // Note: logging in here signs the browser out (one session per account).
 
+import { createHash } from 'node:crypto';
 import WebSocket from 'ws';
 import { build } from 'esbuild';
 import { tmpdir } from 'node:os';
@@ -50,7 +51,7 @@ let cid = '';
 let sid = '';
 
 async function call(method, apiPath, body, params = {}) {
-  const qs = new URLSearchParams({ ...params, ...(token ? { token } : {}) });
+  const qs = new URLSearchParams(params); // token goes in the Csrf-Token header only, as the app sends it
   const url = `${BASE}/controller-api${cid ? `/${cid}` : ''}/api/v2/${apiPath}?${qs}`;
   const res = await fetch(url, {
     method,
@@ -69,7 +70,14 @@ async function call(method, apiPath, body, params = {}) {
   return json.result;
 }
 const sim = (method, p) => fetch(`${BASE}/sim/${p}`, { method }).then((r) => r.json());
-const device = (mac) => call('GET', `devices/${mac}`);
+// The dashboard's lookup: the device's row in the adopted or pending grid.
+const device = async (mac) => {
+  for (const grid of ['grid/devices/adopted', 'grid/devices/pending']) {
+    const hit = (await call('GET', grid, undefined, { currentPage: 1, currentPageSize: 200 }))?.data?.find((d) => d.mac === mac);
+    if (hit) return hit;
+  }
+  return { mac, status: undefined };
+};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Poll a device and record every status it passes through until `done`. */
@@ -92,16 +100,23 @@ let wlanId;
 let lldpBefore;
 let sshBefore;
 
-/** Same multipart upload the dashboard sends for a manual firmware upgrade. */
-async function uploadFirmware(name, bytes = 4096) {
-  const form = new FormData();
-  form.append('file', new Blob([new Uint8Array(bytes)]), name);
-  const res = await fetch(`${BASE}/controller-api/${cid}/api/v2/files/sites/${sid}/device/upgrade?token=${token}`, {
-    method: 'POST',
-    headers: { cookie, 'Csrf-Token': token },
-    body: form,
-  });
-  return res.json();
+/** Same two-step multipart upload the dashboard (and the vendor UI) sends for a manual firmware upgrade. */
+async function uploadFirmware(name, bytes = 4096, { md5 = true } = {}) {
+  const file = new Uint8Array(bytes);
+  const data = JSON.stringify(md5 ? { md5: createHash('md5').update(file).digest('hex') } : {});
+  const post = async (withFile) => {
+    const form = new FormData();
+    form.append('data', data);
+    if (withFile) form.append('file', new Blob([file]), name);
+    const res = await fetch(`${BASE}/controller-api/${cid}/api/v2/files/sites/${sid}/device/upgrade`, {
+      method: 'POST',
+      headers: { cookie, 'Csrf-Token': token },
+      body: form,
+    });
+    return res.json();
+  };
+  const probe = await post(false);
+  return probe.errorCode !== 0 || probe.result?.fileId ? probe : post(true);
 }
 
 /** Open a terminal session through the gateway, run commands, return the text. */
@@ -139,13 +154,15 @@ try {
 
   // ── 1. discovery ──
   await sim('POST', 'reset');
-  const pending = await call('GET', 'grid/devices/pending', undefined, { currentPage: 1, pageSize: 100 });
+  const pending = await call('GET', 'grid/devices/pending', undefined, { currentPage: 1, currentPageSize: 100 });
   const pendingMacs = (pending.data ?? []).map((d) => d.mac);
   check('Simulated devices show up as pending', [AP, SW, BAD].every((m) => pendingMacs.includes(m)), pendingMacs.join(', '));
   check('Pending tab counts include them', (pending.deviceStat?.allDevices ?? 0) >= 3, `allDevices ${pending.deviceStat?.allDevices}`);
 
   // ── 2. adoption ──
-  await call('POST', `sites/${sid}/cmd/devices/adopt`, { macList: [AP, SW, BAD] });
+  const wrongBody = await call('POST', `sites/${sid}/cmd/devices/adopt`, { macList: [AP] }).then(() => 'accepted', (e) => e.message);
+  check('Adopt with a {macList} body is refused', wrongBody !== 'accepted', wrongBody);
+  await call('POST', `sites/${sid}/cmd/devices/batchAdopt`, { macs: [AP, SW, BAD], deviceSeriesType: 0 });
   const [ap, sw, bad] = await Promise.all([
     watch(AP, (d) => d.status === 14),
     watch(SW, (d) => d.status === 14),
@@ -157,7 +174,7 @@ try {
   check('AP got its WLAN group on adoption', Boolean(ap.d.wlanGroup), `group "${ap.d.wlanGroup}"`);
   note(`AP broadcasts: ${(ap.d.simBroadcast ?? []).map((b) => `${b.ssid}@${b.band}`).join(', ') || 'nothing'}`);
   note(`Switch received: ${(sw.d.provision?.items ?? []).join(' · ')}`);
-  const adopted = await call('GET', 'grid/devices/adopted', undefined, { currentPage: 1, pageSize: 200 });
+  const adopted = await call('GET', 'grid/devices/adopted', undefined, { currentPage: 1, currentPageSize: 200 });
   const adoptedMacs = (adopted.data ?? []).map((d) => d.mac);
   check('Adopted list has AP + switch, not the failed one', adoptedMacs.includes(AP) && adoptedMacs.includes(SW) && !adoptedMacs.includes(BAD));
   const alerts = await call('GET', `sites/${sid}/alerts/num`);
@@ -203,7 +220,7 @@ try {
   check('Switch was not touched by a wireless change', swNow.status === 14 && swNow.provision?.at === swProvisionedAt);
 
   // ── 3b. Wi-Fi parity: the dashboard editor provisions what the legacy one does ──
-  const listSsids = async () => (await call('GET', `sites/${sid}/setting/wlans/${wlanId}/ssids`, undefined, { currentPage: 1, pageSize: 100 })).data;
+  const listSsids = async () => (await call('GET', `sites/${sid}/setting/wlans/${wlanId}/ssids`, undefined, { currentPage: 1, currentPageSize: 100 })).data;
   const deep = (o) => JSON.parse(JSON.stringify(o, (k, v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort()) : v)));
   const comparable = (row) => {
     const { id, idInt, index, name, ...rest } = row;
@@ -286,15 +303,19 @@ try {
   await call('POST', `sites/${sid}/cmd/devices/${SW}/forceProvision`, {});
   r = await watch(SW, (d) => d.status === 14 && d.provision?.reason === 'Force provision');
   check('Force provision: provisioning → connected', r.seen.includes(10), r.seen.join(' → '));
-  await call('POST', `sites/${sid}/cmd/devices/${AP}/reboot`, {});
+  await call('POST', `sites/${sid}/cmd/devices/${AP}/reboot`, { mac: AP });
   r = await watch(AP, (d) => d.status === 14 && d.provision?.reason?.includes('reboot'), 40000);
   check('Reboot: rebooting → disconnected → provisioning → connected', r.seen.join('→').endsWith('13→0→10→14'), r.seen.join(' → '));
 
   // ── 7. retry the failed adoption after fixing it ──
-  await sim('POST', `devices/${BAD}/fix`);
-  await call('POST', `sites/${sid}/cmd/devices/adopt`, { macList: [BAD] });
+  const wrongLogin = await call('POST', `sites/${sid}/cmd/devices/adopt`, { mac: BAD, username: 'admin', password: 'nope' }).then(
+    () => 'accepted',
+    (e) => e.message,
+  );
+  check('Adopting with a wrong device login is refused (-39003)', /username or password is incorrect/.test(wrongLogin), wrongLogin);
+  await call('POST', `sites/${sid}/cmd/devices/adopt`, { mac: BAD, username: 'admin', password: 'garden-pass' });
   r = await watch(BAD, (d) => d.status === 14);
-  check('Retried adoption succeeds once the device is fixed', r.d.status === 14, r.seen.join(' → '));
+  check('Retried adoption with the device login succeeds', r.d.status === 14, r.seen.join(' → '));
 
   // ── 8. per-AP configuration ──
   const apCfg = await call('GET', `sites/${sid}/eaps/${AP}`);
@@ -302,11 +323,17 @@ try {
   await call('PUT', `sites/${sid}/eaps/${AP}/config/general`, { name: 'SIM-EAP650-Hall', ledSetting: 0 });
   r = await watch(AP, (d) => d.status === 14 && d.provision?.request === 'PUT eaps/config/general');
   check('Rename + LED off: AP reconfigures and takes the new name', r.d.name === 'SIM-EAP650-Hall' && r.seen.includes(11) && r.d.provision.items.includes('LED off (device)'), `${r.seen.join(' → ')} · ${r.d.name}`);
-  await call('PUT', `sites/${sid}/eaps/${AP}/config/radios`, { radioSetting5g: { ...apCfg.radioSetting5g, channel: '44', channelWidth: '5', txPowerLevel: 3, txPower: 18 } });
+  // radioSetting.channel takes the channel list entry's `value`, not the channel number.
+  const list5 = (await call('GET', `sites/${sid}/eaps/${AP}/channelInfo`)).data.find((r) => r.radioId === 1).channelList;
+  const ch44 = list5.find((c) => c.channelValue === 44);
+  check('Channel list labels match the controller ("44 / 5220MHz", own value index)', ch44?.channelName === '44 / 5220MHz' && String(ch44.value) !== '44', JSON.stringify(ch44));
+  await call('PUT', `sites/${sid}/eaps/${AP}/config/radios`, { radioSetting5g: { ...apCfg.radioSetting5g, channel: String(ch44.value), channelWidth: '5', txPowerLevel: 3, txPower: 18 } });
   r = await watch(AP, (d) => d.status === 14 && d.provision?.request === 'PUT eaps/config/radios');
   const radio5 = r.d.provision.items.find((i) => i.startsWith('5 GHz'));
   check('5 GHz radio set to channel 44, 80 MHz, 18 dBm', radio5 === '5 GHz ch 44 · 80 MHz · 18 dBm', radio5);
-  const badRadio = await call('PUT', `sites/${sid}/eaps/${AP}/config/radios`, { radioSetting5g: { ...apCfg.radioSetting5g, channel: '14' } }).then(() => 'accepted', (e) => e.message);
+  const live = await call('GET', `sites/${sid}/eaps/${AP}`);
+  check('AP detail reports the live channel, width and utilization', live.wp5g?.actualChannel === '44 / 5220MHz' && live.wp5g?.bandWidth === '80MHz' && typeof live.wp5g?.rxUtil === 'number', JSON.stringify(live.wp5g));
+  const badRadio = await call('PUT', `sites/${sid}/eaps/${AP}/config/radios`, { radioSetting5g: { ...apCfg.radioSetting5g, channel: '99' } }).then(() => 'accepted', (e) => e.message);
   check('Invalid channel is rejected', badRadio.includes('-1001'), badRadio);
   await call('PUT', `sites/${sid}/eaps/${AP}/config/ip-settings`, { ipSetting: { mode: 'static', configIp: '192.168.0.50', configMask: '255.255.255.0', configGate: '192.168.0.1' } });
   r = await watch(AP, (d) => d.status === 14 && d.provision?.request === 'PUT eaps/config/ip-settings');
@@ -320,6 +347,9 @@ try {
   check('Online upgrade: upgrading → rebooting → connected on the new version', r.seen.join('→').endsWith('12→13→0→10→14'), `${r.seen.join(' → ')} · ${r.d.firmwareVersion}`);
   const again = await call('POST', `sites/${sid}/cmd/devices/${AP}/onlineUpgrade`, { mac: AP }).then(() => 'accepted', (e) => e.message);
   check('A second online upgrade is refused (already latest)', again.includes('latest'), again);
+  await call('POST', `sites/${sid}/cmd/devices/checkFirmware`, { mac: [AP] });
+  const noMd5 = await uploadFirmware('EAP650v1_1.2.0_20251001.bin', 4096, { md5: false });
+  check('A firmware upload without md5 is refused', noMd5.errorCode === -1001, noMd5.msg);
   await call('POST', `sites/${sid}/cmd/devices/checkFirmware`, { mac: [AP] });
   const wrong = await uploadFirmware('EAP225v3_5.2.0_20251001.bin');
   check('Firmware for another model is rejected', wrong.errorCode === -39304, wrong.msg);
@@ -356,14 +386,14 @@ try {
   check('After SSH is turned off again, the terminal is refused', closed.includes('SSH is turned off'), '');
 
   // ── 11. forget ──
-  await call('POST', `sites/${sid}/cmd/devices/${AP}/forget`, {});
+  await call('POST', `sites/${sid}/cmd/devices/${AP}/forget`, { mac: AP });
   r = await watch(AP, (d) => d.status === 20);
   check('Forgotten AP returns to pending with no config', r.d.status === 20 && !r.d.provision, r.seen.join(' → '));
 
   // ── 12. event log ──
-  const events = await call('GET', `sites/${sid}/events`, undefined, {
+  const events = await call('GET', `sites/${sid}/logs/events`, undefined, {
     currentPage: 1,
-    pageSize: 100,
+    currentPageSize: 100,
     'filters.timeStart': t0 - 1000,
     'filters.timeEnd': Date.now() + 1000,
   });

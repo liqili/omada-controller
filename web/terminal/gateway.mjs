@@ -6,7 +6,11 @@
 //   1. The page opens ws(s)://<same origin>/terminal/ws. The upgrade is
 //      refused unless its Origin matches its Host (no cross-site use).
 //   2. The first message names the device and carries the page's controller
-//      session token: {type:"open", omadacId, token, siteId, mac, cols, rows}.
+//      session token: {type:"open", omadacId, token, siteId, mac, cols, rows,
+//      command?}. `command` (optional) is run instead of the login shell, on a
+//      PTY — the same as `ssh -t user@device <command>`. Some EAP builds (e.g.
+//      F65) open TP-Link's "EAP>" CLI for a plain login, but their dropbear runs
+//      a command given on the ssh command line in a real shell: command "sh".
 //   3. With the browser's own session cookie + token, the gateway asks the
 //      CONTROLLER for that device, the site's SSH setting and the site's
 //      device account. Any failure (signed out, no access, unknown device)
@@ -28,6 +32,18 @@ const { Client } = ssh2;
 const IDLE_MS = 30 * 60_000;
 const MAC = /^[0-9A-F]{2}(-[0-9A-F]{2}){5}$/;
 const ID = /^[0-9a-zA-Z]{8,64}$/;
+const MAX_COMMAND = 256;
+
+/** The startup command from the open message: undefined for none, null when invalid. */
+export function startupCommand(raw) {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== 'string') return null;
+  const cmd = raw.trim();
+  if (!cmd) return undefined;
+  // One line of printable text: no newlines or control bytes smuggling more input.
+  if (cmd.length > MAX_COMMAND || /[\x00-\x1f\x7f]/.test(cmd)) return null;
+  return cmd;
+}
 
 /**
  * @param {import('node:http').Server} server
@@ -92,14 +108,25 @@ export function attachTerminal(server, { controllerGet, path = '/terminal/ws', o
       if (open?.type !== 'open' || !ID.test(omadacId ?? '') || !ID.test(siteId ?? '') || !MAC.test(mac ?? '') || typeof token !== 'string') {
         return fail('Bad request.');
       }
+      const command = startupCommand(open.command);
+      if (command === null) return fail(`The startup command must be one line of at most ${MAX_COMMAND} characters.`);
       const auth = { cookie: req.headers.cookie, token };
       const api = (p) => controllerGet(`/${omadacId}/api/v2/${p}`, auth);
+      // The controller has no devices/{mac}; detail lives under the device
+      // type (eaps | switches | gateways), and the other two answer "does not
+      // exist". Take whichever knows the MAC; pass on a session/HTTP failure.
+      const findDevice = () =>
+        Promise.any(['eaps', 'switches', 'gateways'].map((kind) => api(`sites/${siteId}/${kind}/${mac}`))).catch((all) => {
+          const fatal = all.errors.find((e) => /not signed in|^HTTP /.test(e.message));
+          if (fatal) throw fatal;
+          return undefined;
+        });
 
       let device, sshSetting, siteSetting;
       try {
         status('Checking your session with the controller…');
         [device, sshSetting, siteSetting] = await Promise.all([
-          api(`devices/${mac}`),
+          findDevice(),
           api(`sites/${siteId}/setting/ssh`),
           api(`sites/${siteId}/setting`),
         ]);
@@ -118,12 +145,13 @@ export function attachTerminal(server, { controllerGet, path = '/terminal/ws', o
       if (!target.host) return fail('The controller has no IP address for this device.');
 
       status(`Connecting to ${device.name ?? mac} at ${target.host}:${target.port} as ${account.username}…`);
-      log(`terminal: ${mac} ${target.host}:${target.port} opened`);
+      log(`terminal: ${mac} ${target.host}:${target.port} opened${command ? ` (command: ${command})` : ''}`);
       ssh = new Client();
       ssh
         .on('ready', () => {
-          ssh.shell({ term: 'xterm-256color', cols: open.cols || 80, rows: open.rows || 24 }, (err, s) => {
-            if (err) return fail(`Could not start a shell: ${err.message}`);
+          const pty = { term: 'xterm-256color', cols: open.cols || 80, rows: open.rows || 24 };
+          const started = (err, s) => {
+            if (err) return fail(command ? `Could not run "${command}": ${err.message}` : `Could not start a shell: ${err.message}`);
             stream = s;
             touch();
             s.on('data', (d) => send({ type: 'data', data: d.toString('utf8') }));
@@ -132,7 +160,13 @@ export function attachTerminal(server, { controllerGet, path = '/terminal/ws', o
               send({ type: 'exit' });
               ws.close();
             });
-          });
+          };
+          if (command) {
+            status(`Running "${command}" on a terminal (like ssh -t)…`);
+            ssh.exec(command, { pty }, started);
+          } else {
+            ssh.shell(pty, started);
+          }
         })
         .on('error', (e) => fail(`SSH: ${e.message}`))
         .on('close', () => ws.readyState === ws.OPEN && ws.close())

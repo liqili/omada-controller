@@ -58,6 +58,14 @@ export function deviceStatus(status?: number, statusCategory?: number): DeviceSt
   return { label: status === undefined ? 'Unknown' : `Status ${status}`, color: 'default', transient: false };
 }
 
+/**
+ * Whether a device takes commands (locate, reboot, force provision): up and not
+ * mid-transition (rebooting / provisioning / configuring count as "connected" upstream).
+ */
+export function deviceCommandable(d: { status: number; statusCategory?: number }): boolean {
+  return !deviceStatus(d.status, d.statusCategory).transient && (d.statusCategory === 1 || (d.status >= 14 && d.status <= 17));
+}
+
 export function DeviceStatusChip({ status, statusCategory }: { status?: number; statusCategory?: number }) {
   const s = deviceStatus(status, statusCategory);
   return <Chip label={s.label} color={s.color} size="small" variant="outlined" />;

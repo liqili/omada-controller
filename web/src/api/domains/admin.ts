@@ -1,14 +1,14 @@
-import { api, scoped, unwrap } from '../client';
+import { api, getAllPages, scoped, unwrap } from '../client';
 import { normalizeList, type SettingList } from './settings';
 
 // Controller-level administration: accounts, firmware, hotspot vouchers.
 // GET verified live against v5.15.6.7 (2026-11-13). Write verbs for these are
 // NOT pinned down yet, so the UI is read-only here:
 //
-//   GET users?currentPage&pageSize          → grid of UserVO
+//   GET users?currentPage&currentPageSize          → grid of UserVO
 //   GET current/user-detail                 → signed-in account
-//   GET upgrade/firmwares?currentPage&pageSize → uploaded firmware files (grid)
-//   GET hotspot/sites/{sid}/vouchers?currentPage&pageSize → voucher grid
+//   GET upgrade/firmwares?currentPage&currentPageSize → uploaded firmware files (grid)
+//   GET hotspot/sites/{sid}/vouchers?currentPage&currentPageSize → voucher grid
 //   ✗   users/roles → -1005, upgrade/overview|history → -1600
 
 export interface ControllerUser {
@@ -49,10 +49,8 @@ export interface Voucher {
   [k: string]: unknown;
 }
 
-const page = { currentPage: 1, pageSize: 100 };
-
 export async function listUsers(): Promise<SettingList<ControllerUser>> {
-  return normalizeList(await unwrap<unknown>(api.get(scoped('/api/v2/users'), { params: page })));
+  return normalizeList(await getAllPages(scoped('/api/v2/users')));
 }
 
 export async function getCurrentUser(): Promise<CurrentUser> {
@@ -60,11 +58,9 @@ export async function getCurrentUser(): Promise<CurrentUser> {
 }
 
 export async function listFirmwares(): Promise<SettingList<Firmware>> {
-  return normalizeList(await unwrap<unknown>(api.get(scoped('/api/v2/upgrade/firmwares'), { params: page })));
+  return normalizeList(await getAllPages(scoped('/api/v2/upgrade/firmwares')));
 }
 
 export async function listVouchers(siteId: string): Promise<SettingList<Voucher>> {
-  return normalizeList(
-    await unwrap<unknown>(api.get(scoped(`/api/v2/hotspot/sites/${siteId}/vouchers`), { params: page })),
-  );
+  return normalizeList(await getAllPages(scoped(`/api/v2/hotspot/sites/${siteId}/vouchers`)));
 }

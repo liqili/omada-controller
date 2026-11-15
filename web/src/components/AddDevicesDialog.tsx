@@ -20,6 +20,7 @@ import {
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { usePendingDevices, useAdoptMany } from '../hooks/queries';
+import { useAdoptFlow } from './AdoptFlow';
 import { useSites } from '../hooks/useSiteContextBridge';
 import { useSite } from '../hooks/useSiteContext';
 import { DeviceStatusChip } from './StatusChip';
@@ -49,12 +50,16 @@ export function AddDevicesDialog({ open, onClose }: { open: boolean; onClose: ()
   const [target, setTarget] = useState(siteId ?? '');
   const [cat, setCat] = useState<Cat>('all');
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  // A wrong device login (-39003) is handled by the adopt flow's login dialog;
+  // other failures show here.
+  const [adoptError, setAdoptError] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) {
       setChecked(new Set());
       setTarget(siteId ?? '');
       adoptMany.reset();
+      setAdoptError(null);
       pending.refetch();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -108,13 +113,17 @@ export function AddDevicesDialog({ open, onClose }: { open: boolean; onClose: ()
     { header: 'Version', render: (d) => d.firmwareVersion ?? d.version ?? '—', hideOnMobile: true },
   ];
 
-  const adopt = () =>
-    adoptMany.mutate([...checked], {
-      onSuccess: () => {
-        setChecked(new Set());
-        pending.refetch();
-      },
-    });
+  // Into the site picked above (vendor: getUrlPrefix({site: adoptSite})), not the current one.
+  const adoptFlow = useAdoptFlow(
+    async (list, account) => {
+      setAdoptError(null);
+      await adoptMany.mutateAsync({ devices: list, account, siteId: target });
+      setChecked(new Set());
+      pending.refetch();
+    },
+    (e) => setAdoptError((e as Error).message),
+  );
+  const adopt = () => adoptFlow.start(devices.filter((d) => checked.has(d.mac)));
 
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
@@ -195,9 +204,9 @@ export function AddDevicesDialog({ open, onClose }: { open: boolean; onClose: ()
               </Typography>
             </Box>
           )}
-          {adoptMany.isError && (
+          {adoptError && (
             <Alert severity="error" sx={{ mt: 1 }}>
-              {(adoptMany.error as Error).message}
+              {adoptError}
             </Alert>
           )}
         </Box>
@@ -212,6 +221,7 @@ export function AddDevicesDialog({ open, onClose }: { open: boolean; onClose: ()
         </Button>
         <Button onClick={onClose}>Cancel</Button>
       </DialogActions>
+      {adoptFlow.dialog}
     </Dialog>
   );
 }

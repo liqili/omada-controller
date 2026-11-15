@@ -64,13 +64,29 @@ User's explicit asks so far:
 ## 3. Architecture (implemented)
 
 ```
-browser :8080 → nginx (web/Dockerfile, nginx.conf)
+browser :8080 → nginx (web/Dockerfile, nginx.conf.template)
    ├─ /            → static React build (web/dist)
-   └─ /controller-api/* → https://omada-controller:8043/*   (proxy_ssl_verify off)
+   ├─ /controller-api/* → ${OMADA_CONTROLLER_URL}/*   (proxy_ssl_verify off)
+   └─ /terminal/ws      → ${TERMINAL_GATEWAY_URL}     (web/terminal)
 ```
 
+- Controller address is configurable (2026-11-14): `nginx.conf.template` is rendered
+  by the nginx image's entrypoint into `/etc/nginx/conf.d/default.conf` at container
+  start. Defaults in `web/Dockerfile`: `OMADA_CONTROLLER_URL=https://omada-controller:8043`,
+  `TERMINAL_GATEWAY_URL=http://omada-terminal:8091` (= the bundled compose).
+  `controller-url.envsh` (→ `/docker-entrypoint.d/15-…`) strips a trailing `/` and
+  exits with a message on a bad value. The restore location uses `rewrite … break` +
+  `proxy_pass ${OMADA_CONTROLLER_URL}` (no resolver needed). `web/docker-compose.standalone.yml`
+  + `.env.example` deploy UI + terminal against an existing controller (user's NAS
+  case). Verified: standalone copy on :8081 → controller by IP (172.17.0.1:8043, no
+  shared Docker network): api/info, sign-in in the browser, dashboard, snapshot, restore
+  route reaches the controller, terminal gateway reachable; bad URL → exit 1 with message.
+
 - `web/src/api/client.ts`: axios baseURL `/controller-api`. Interceptor attaches the
-  login token as `Csrf-Token` header **and** `?token=` param. `scoped(path)` prefixes
+  login token as the `Csrf-Token` header **only** — as the vendor UI does; the old
+  `?token=` copy was dropped 2026-11-15 (it leaked the session token into proxy logs
+  and URLs; the terminal gateway and sim are header-only too). Logout is
+  `POST /{omadacId}/api/v2/logout` (unscoped it is -1600). `scoped(path)` prefixes
   `/{omadacId}`. Response envelope `{errorCode, msg, result}`; `unwrap()` throws on
   non-zero errorCode; `-1200` triggers re-login.
 - Auth: `POST /api/v2/login {username,password,remember?}` → cookie
@@ -96,9 +112,8 @@ cd /Users/kunkka/Git/omada-controller/web && npm run build
 cd /Users/kunkka/Git/omada-controller && docker-compose up -d --build --no-deps web-ui
 # terminal gateway (only when web/terminal/ changed):
 cd /Users/kunkka/Git/omada-controller && docker-compose up -d --build --no-deps terminal
-# ALWAYS pass --no-deps: without it compose also RECREATES omada-controller
-# (docker-compose.yml has drifted from the running container) — ~1 min outage.
-# Data survives (named volumes), but don't do it by accident.
+# ALWAYS pass --no-deps: without it compose may also recreate omada-controller
+# (~1 min outage; data survives in named volumes) — don't do it by accident.
 # verify: curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/  → 200
 ```
 
@@ -118,21 +133,30 @@ curl -s -b $JAR -H "Csrf-Token: $T" \
 
 Legend: ✅ = verified working on this build. ✗ = verified failing (verb or device absent).
 
+**Paging (fixed 2026-11-15):** grids take `currentPage` + **`currentPageSize`** (what the
+legacy UI sends; the response echoes `currentSize`). `pageSize` is silently ignored —
+pages then hold 10 rows — and `sites/{sid}/clients` failed with it on the user's NAS
+controller. All list calls go through `getAllPages()` (`src/api/client.ts`), which sends
+`currentPageSize=100` and follows `currentPage` until `totalRows`. Active clients:
+`sites/{sid}/clients?…&filters.active=true` (legacy Clients page). The `pageSize`
+rows below were probed with the wrong name; their 10-row results were the default.
+
 ### Controller-level
 | Path (after `/{omadacId}/api/v2/`) | Verbs | Notes |
 |---|---|---|
 | `controller/setting` | GET ✅ PATCH ✅ | PATCH must **strip `certificate`** key (else `-1001 cerId should not be null`). Minimal PATCH fails with -1 — echo the **full object minus certificate**. Sections: `general{name,timeZone,region,dst{enable,start,end,…},ntpEnable,ntpServers[]}`, `mailServer{smtpEnable,sslEnable,authEnable}`, `webPort{manageHttpPort,manageHttpsPort,portalHttpPort,portalHttpsPort,hostName,autoRefresh,httpsRedirect,autoPortalIpEnable,portalHttpsRedirect}`, `builtInRadiusServer{enable,authServerPort,tunnelReplyEnable,status,serverAddressType}`, `radiusProxy{enable,status}`, `deviceAccessManagement{webControlHttp,webControlHttps,appDiscovery}`, `firmware{controllerNotification}`, `hardware`, `certificate` (strip!). Change→verify→revert cycle verified. |
-| `upgrade/firmwares?currentPage=1&pageSize=10` | GET ✅ | Grid envelope; currently `totalRows:0` (no firmware files uploaded). |
+| `upgrade/firmwares?currentPage=1&currentPageSize=10` | GET ✅ | Grid envelope; currently `totalRows:0` (no firmware files uploaded). |
 | `upgrade/overview`, `upgrade/firmware/plans`, `upgrade/history` | ✗ -1600 | Likely device-scoped or version-specific. |
-| `users?currentPage=1&pageSize=10` | GET ✅ | Grid of `UserVO`: `{id,type,roleType,roleId:"master_admin_id",roleName,name,omadacId,verified,privilege:{sites[],lastVisited,all},userLevel,forceModify,roleDetail{...privilege:{globalDashboard,dashboard,devices,adopt,addDevices,…}}}`. |
+| `users?currentPage=1&currentPageSize=10` | GET ✅ | Grid of `UserVO`: `{id,type,roleType,roleId:"master_admin_id",roleName,name,omadacId,verified,privilege:{sites[],lastVisited,all},userLevel,forceModify,roleDetail{...privilege:{globalDashboard,dashboard,devices,adopt,addDevices,…}}}`. |
 | `users/roles` | ✗ -1005 forbidden | |
-| `sites/{sid}/alerts`, `sites/{sid}/events` | GET ✅ | **Time window is required**: `filters.timeStart` + `filters.timeEnd` (epoch ms) plus `currentPage/pageSize`; alerts also take `filters.archived`. Optional `filters.level` (Error/Warning/Information), `filters.module` (Operation/System/Device/Client), `searchKey`. Without the window → -1001. Controller-scoped `alerts`/`events` work the same way. |
+| `sites/{sid}/logs/alerts`, `sites/{sid}/logs/events` | GET ✅ | **What the Logs page uses** (vendor `getAlertSiteLogs`/`getEventSiteLogs`, modules/js/useLogTable; found 2026-11-15 on the user's NAS — the older `sites/{sid}/alerts`·`events` below came back empty there while the vendor UI listed alerts). Required window `filters.timeStart`/`timeEnd` (epoch ms) + `currentPage/currentPageSize`; alerts take `filters.resolved` (vendor opens on `false`, last 30 days). Optional `filters.level` (Critical/Error/Warning/Information), `filters.module` (Operation/System/Device/Client), `searchKey`. Result `{data, logStatistic, totalRows, currentPage, currentSize}`; rows' `content` has `[ap:MAC]`-style placeholders resolved from `deviceNames`/`clientNames` (`logText()`). Resolve: POST `sites/{sid}/cmd/logs/alerts/resolve {logs, selectAll, startTime, endTime}` (registry only, not wired). |
+| `sites/{sid}/alerts`, `sites/{sid}/events` | GET (legacy) | Older list API with `filters.archived`. Answers, but returned nothing on the user's NAS — superseded by `logs/…` above. |
 | `log/nums` | GET ✅ | `{totalNum, limitNum}`. |
 | `logs/notification`, `sites/{sid}/logs/notification` | GET ✅ | Per-event email/webhook notification matrix. Not used by the UI yet. |
 | `current/user-detail` | GET ✅ | Signed-in account. |
 | `sites/{sid}/alerts/num` | GET ✅ | `{result:{alertNum:0}}` — use for dashboard badge. |
 | `webhook/setting` | GET ✅ | `{result:{webhookSettings:[]}}`. Write verb unknown. |
-| `hotspot/sites/{sid}/vouchers?currentPage=1&pageSize=10` | GET ✅ | Voucher grid (empty). |
+| `hotspot/sites/{sid}/vouchers?currentPage=1&currentPageSize=10` | GET ✅ | Voucher grid (empty). |
 | `hotspot/sites/setting/voucher/portals`, `sites/{sid}/setting/voucher/portals` | exist in SPA | Not yet probed. |
 | `maintenance/*`, `licenses`, `controller/info`, `controller/status`, `logs`, `audit-logs` | ✗ -1600 | Not available on this build/path layout. |
 | `anon/controllerInfo`, `loginStatus`, `logout`, `loginWithToken` | ✅ (auth) | |
@@ -149,7 +173,7 @@ Legend: ✅ = verified working on this build. ✗ = verified failing (verb or de
 | `setting` | GET ✅ PATCH ✅ | Full site setting object; SPA registry: `proxy:{root:"result",read:{type:"GET",url:""},update:{type:"PATCH",url:""}}`. |
 | `setting/wlans` | GET ✅ POST ✅ `{name, clone:false}` → `{wlanId}` | `{result:{maxSsids2G:8,maxSsids5G:8,maxSsids6G:8,maxSsidsMlo:8,data:[{name:"Default",clone:false,site,primary:true,id:"6af42f0f…",resource:0}]}}` — WLAN **groups**. |
 | `setting/wlans/{wlanId}` | PATCH ✅ `{name}` · DELETE ✅ | Rename/delete a WLAN group (live-verified create→rename→delete). |
-| `setting/wlans/{wlanId}/ssids?currentPage=1&pageSize=10` | GET ✅ | `{result:{totalRows,currentPage,currentSize,data:[],ssidNum2g,ssidNum5g,ssidNum6g,ssidNumMlo,gpon:false}}`. |
+| `setting/wlans/{wlanId}/ssids?currentPage=1&currentPageSize=10` | GET ✅ | `{result:{totalRows,currentPage,currentSize,data:[],ssidNum2g,ssidNum5g,ssidNum6g,ssidNumMlo,gpon:false}}`. |
 | `setting/wlans/{wlanId}/ssids` | POST ✅ → `{ssidId}` | **Solved.** `band` is a BITMASK (1=2.4G, 2=5G, 4=6G; 0 → -1001), `pmfMode` ∈ {1 mandatory, 2 capable, 3 disabled}, `rateLimit`/`ssidRateLimit` = `{downLimitEnable,upLimitEnable,…}`, `pskSetting{securityKey,versionPsk,encryptionPsk,gikRekeyPskEnable,rekeyPskInterval,intervalPskType}` when `security:3`. Bodies now come from `serializeSsid()` in `src/api/domains/ssidForm.ts` — a port of the vendor editor (see §6a). |
 | `setting/wlans/{wlanId}/ssids/{ssidId}` | **PATCH ✅** DELETE ✅ | PATCH needs the full SSID (partial → -1001); the editor sends the vendor's edit body (= create body minus `deviceType`). GET of a single SSID → -1600. No per-SSID enable flag exists. |
 | `setting/ssids` (flat) | GET only | Read-only convenience list; all writes go through the per-group paths above. |
@@ -161,9 +185,14 @@ Legend: ✅ = verified working on this build. ✗ = verified failing (verb or de
 | `setting/portals` | GET ✅ (`[]`) | Root PATCH ✗ -1600. SPA has `/setting/portals/{portalId}` (`GET /setting/portals/0` → `-34326` "This portal setting does not exist" = path exists, id absent). Create/list semantics unknown — see §7 #3. |
 | `setting/firewall/timeout` | GET/PATCH (SPA) ; `setting/firewall/wids`, `firewall/wips` GET/PUT (SPA) | Not live-tested; may need gateway. |
 | `setting/localuser/portals` | exists in SPA | Not probed. |
-| `setting/lan/networks`, `lan/profiles`, `wan/networks`, `wanlanstatus`, `vpns`, `vpns/users`, `wireguard`, `sslvpn/server`, `transmission/{portForwardings,staticRoutings,policyRoutings,bandwidthControls,alg}`, `firewall/{acls?type=0,urlfilterings?type=gateway,attackdefense,timeout}`, `ips`, `service/{dhcp,ddns,rebootSchedules,poeSchedules,scheduleUpgrade}`, `mdns`, `iptv`, `accessControl`, `radiusProfiles`, `portal/candidates`, `profiles/{rateLimits,timeranges,groups}`, `capacity` | GET ✅ | **These all answer without a gateway** (the earlier -1600s were wrong path names like `setting/lan`, `setting/nat`). Grids need `currentPage/pageSize`. Write verbs from the SPA registry, NOT live-tested: `mdns` PUT, `accessControl` PATCH, `firewall/timeout` PATCH, `service/ddns|rebootSchedules|poeSchedules` PATCH. |
+| `setting/lan/networks`, `lan/profiles`, `wan/networks`, `wanlanstatus`, `vpns`, `vpns/users`, `wireguard`, `sslvpn/server`, `transmission/{portForwardings,staticRoutings,policyRoutings,bandwidthControls,alg}`, `firewall/{acls?type=0,urlfilterings?type=gateway,attackdefense,timeout}`, `ips`, `service/{dhcp,ddns,rebootSchedules,poeSchedules,scheduleUpgrade}`, `mdns`, `iptv`, `accessControl`, `radiusProfiles`, `portal/candidates`, `profiles/{rateLimits,timeranges,groups}`, `capacity` | GET ✅ | **These all answer without a gateway** (the earlier -1600s were wrong path names like `setting/lan`, `setting/nat`). Grids need `currentPage/currentPageSize`. Write verbs from the SPA registry, NOT live-tested: `mdns` PUT, `accessControl` PATCH, `firewall/timeout` PATCH, `service/ddns|rebootSchedules|poeSchedules` PATCH. |
 | `grid/devices/adopted` / `grid/devices/pending` | GET ✅ | Pending grid has `deviceStat:{allDevices,allSwitchsAndGateway,allAps,allOlts}`. POLL 30 s works (detection refresh). |
-| `cmd/devices/add` | POST ✅ | `{mac,name,model,version}` — used by AddDevicesDialog + Add button. `cmd/devices/adopt {macList}` ✅. |
+| `sites/{sid}/cmd/devices/{mac}/locate` · `reboot` · `forceProvision` | POST | Bodies matter: **locate needs `{locateEnable: true|false}`** (an empty body fails on a real controller, 2026-11-15; true flashes the LED, false stops it; the device row's `locateEnable` says which is on), reboot sends `{mac}`, forceProvision none — as the legacy SPA does. `deviceCmd()` in `api/domains/device.ts`. |
+| `sites/{sid}/eaps/{mac}` · `switches/{mac}` · `gateways/{mac}` | GET ✅ | Single-device detail (ApDetailVO / OswDetailVO / OsgDetailVO), as the legacy UI uses it; unknown MAC → -39303 / -39700 / -39501. **There is no controller-level `devices/{mac}`** (-1600 "Unsupported request path"; found 2026-11-15 on the user's NAS controller with a real AP — it had only ever been answered by the simulator). `uptime` is a display string; seconds are `uptimeLong`. Live fields drive the Details tab (`pages/device/DetailSections.tsx`, legacy initDetails port): `wp{2g,5g,5g2,6g}` {actualChannel "36 / 5180MHz", rdMode, bandWidth, txPower, rxUtil/txUtil/interUtil or busyUtil}, `radioTraffic*`, `lanTraffic`, `wiredUplink` {duplex, rate, up/downPackets/Bytes, activity — real firmware sends **`rate` as a string** ("2500") and no `name`}, `wirelessUplink`, `downlinkList`, cpuUtil/memUtil, publicIp, ipv6List. Formatters in `detailFormat.ts` take numbers or numeric strings (`num()`), as the legacy `isNumeric` checks do. `actualChannel` can be padded ("40  / 5200MHz") or "N/A"; a radio with `radioSetting{band}.radioEnable: false` still sends `wp{band}` and is left out of the header. Test fixture from a real Festa F76 response: `src/__tests__/fixtures/festa-f76-detail.json`. |
+| `sites/{sid}/eaps/{mac}/channelInfo` | GET (legacy-code verified) | `{data:[{radioId, channelList:[{value, channelValue, channelName, freq, widthFlag, dfs, limit, maxPow}]}]}`. **`radioSetting*.channel` stores the entry's `value` (an index), not `channelValue` (the channel number)**; label is `channelName`; "0" = Auto. The Config tab used channelValue until 2026-11-15 (wrong channel shown/saved). Not handled yet: legacy's widthFlag filtering of channels per channel width, and the 6 GHz PSC-only list (index 4). |
+| `cmd/devices/adopt` · `batchAdopt` | POST | **Fixed 2026-11-15** (the `{macList}` body was only ever accepted by the simulator). Vendor bodies: one device `adopt {mac, username?, password?}`; several `batchAdopt {macs, deviceSeriesType, username?, password?}`. The device's own login is asked for (`components/AdoptFlow.tsx`, `adoptNeedsAccount()`) when the vendor UI asks: one device managed by others (26/27) or failed (24/25) with `adoptFailType` ≠ -1; a batch with any device in 24–27. Adopt goes to the Add dialog's chosen site. A single adopt with a missing/wrong device login answers **`-39003` "Failed to adopt the device because the username or password is incorrect."** with `result {mac, status:24, statusCategory:2}` (user's NAS, 2026-11-15); the vendor UI then only marks the row failed, ours reopens the login dialog with that message and retries until accepted or cancelled (`useAdoptFlow`). The sim's SIM-EAP225-Garden reproduces it (device login admin / garden-pass). `cmd/devices/{mac}/forget` sends `{mac}`; reboot `{mac}`; locate `{locateEnable}`. |
+| `sites/{sid}/config-result/devices` · `config-result/device/{mac}/feature` · `config-result/devices/{mac}/feature/grid` · `devices/{mac}/config/fullSync` | GET · GET · GET · POST | **Devices → Configuration results tab** (added 2026-11-15; vendor chunk modules/js/index-BRDpk7sC.js, enums in virtual_svg-icons-split). Grid: `currentPage, currentPageSize, status` (+ `filters.deviceType` `1,2` gateways&switches / `3` APs, omitted for All; `name`; `mac`) → `{totalRows, statistic{fail,alert,preConfig,configuring,osgAndOsw,ap,all}, onlyNotificationData, data[{mac,name,type,model,needFullSync,supportConfigSync,…}]}`. `status`: 2 Failed (vendor default), 3 Incompatible (the user's NAS request), 4 Configuring, 5 Preconfigure. Features: `?status&deviceType=<row type>` → `{deviceFunctionList[{feature, languageKey (vendor i18n keys, '+'-joined — we humanize them, the vendor locale isn't shipped), uiPosition, expandable, featureItemSum, operationList, timeList, uiErrorCodeList, uiErrorMsgList, unsupportCaps, errCode, entryLimit, subEntryLimit}]}`. Components of an expandable feature: `?currentPage&currentPageSize&feature&status`. "Apply again" = body-less POST `config/fullSync`, offered when `needFullSync && supportConfigSync`. Not done: the switch-only CLI tab (`config-result/device/{mac}/tab-num`, CLI grid, ignore). Vendor page loads only in site view, not Lite mode. Code: `api/domains/configResult.ts`, `pages/ConfigResultsPanel.tsx`, `pages/configResultFormat.ts`. Sim answers these alone (APs: 2 incompatible settings; switch: a failed VLAN until Apply again; offline devices: preconfigure). |
+| `cmd/devices/add` | POST | Vendor: cloud-style manual add `{devices:[{sn | deviceKey, name}]}` → `{operateId}`, not add-by-MAC. Our add-by-MAC client call (never used by a page) was removed. |
 | `rfPlanning` | GET ✅ | `{channelDeployEnable,channelWidthDeployEnable,bandDeployEnable,powerAdjustEnable,scheduleEnable,occurrence{timingType,hour,minute},excludeAps[],chanWidth2g/5g/6g,mode,resource,…}`. |
 | `rfPlanning/config` | **PUT ✅** | The only working save for the 4 toggles (verified errorCode 0). Root PUT/PATCH and `cmd/rfPlanning` → -1600 (cmd needs adopted AP). `rfPlanning/excludeAps` PUT exists (SPA). |
 | `overview`, `dashboard`, `devices`, `clients`, `terminal` | ✅ | Already used by DashboardPage/ClientsPage. |
@@ -187,7 +216,8 @@ All pages below render against the live controller with no console errors
 | `/setup` | `SetupPage` + `setup/RestoreBackup` | First run only (`configured:false`), vendor order: **1. create the Main Administrator** (`anon/register`, shown while `/api/info` says `registeredRoot:false`) → **2. Set up from scratch** (wizardConfig without credentials, then sign in) or **Restore from backup** (.cfg, Retain Device Info, progress, the vendor's compatibility confirm → re-upload with skipConfirm, version/MVLAN errors, restart / address-changed notices, then full reload to /login). Logic in `api/domains/restore.ts` (`interpretRestoreResult` = vendor pollingStatus). **Verified end to end 2026-11-14** on a fresh controller (see §7 item 7). |
 | `/` | `DashboardPage` | Stat tiles + open-alerts tile (`alerts/num`). |
 | `/devices` | `DevicesPage` | Adopted/Pending tabs, Add dialog, per-row Adopt (label "Retry" after a failed adoption, disabled while adopting). Polls every 2 s while any device is in a short-lived state and for 30 s after any device command. |
-| `/devices/:mac` | `DeviceDetailPage` | Status chip + facts, Force provision / Locate / Reboot (enabled only when connected and idle), Forget with confirm. Tabs (`?tab=`), lazy-loaded from `pages/device/`: **Overview** (APs: "Broadcasting"; simulated: "Last configuration push") · **Configuration** (APs only: name + LED, one card per radio with width/channel/power, WLAN group, DHCP/static IP, LLDP + loopback detection; each card saves its own section) · **Firmware** (installed vs latest, release notes, online upgrade, upload a `.bin`) · **Terminal** (SSH through the gateway, xterm.js). |
+| `/devices/:mac` | `DeviceDetailPage` | Header: status chip + channel utilization per switched-on radio. Tabs (`?tab=`), lazy-loaded from `pages/device/`: **Details** (legacy drawer sections: Overview, LAN, Uplink, Downlink, Radios; APs: "Broadcasting") · **Configuration** (APs only: name + LED, one card per radio with width/channel/power, WLAN group, DHCP/static IP, LLDP + loopback detection; each card saves its own section) · **Advanced** (Force provision, Forget with confirm; installed vs latest firmware, release notes, online upgrade, upload a `.bin`; `?tab=firmware` still lands here) · **Terminal** (SSH through the gateway, xterm.js; optional **startup command** run instead of the login shell on a PTY — `ssh -t device <cmd>` — e.g. `sh` for EAPs such as the F65 whose plain login opens the `EAP>` CLI; remembered per model in localStorage; gateway accepts one printable line ≤ 256 chars, `startupCommand()` in `terminal/gateway.mjs`, tested end to end in `terminal/gateway.test.mjs`). Locate / Reboot are in the devices list's Action column. |
+| `files/sites/{sid}/device/upgrade` | POST multipart | **Two-step, as the vendor `su` Proxy.upload does** (found 2026-11-15: a bare `file` upload fails on a real controller): (1) `data={"md5":<hex>}` alone — `{fileId}` back if the controller already holds that file; (2) else `data={"md5"}` + `file`. MD5 is computed in the browser (`src/api/md5.ts`, no dependency; WebCrypto has no MD5). Preceded by `cmd/devices/checkFirmware {mac:[…]}`, followed by `cmd/devices/upgrade {fileId, macs, type, isSingle}`. Simulator enforces md5. |
 | `/clients` | unchanged | As before. |
 | `/logs` | `LogsPage` | Alerts/Events tabs, period/level/source/search filters, paging. Nav badge = unarchived alerts. |
 | `/wlan` | `WlanPage` + `wlan/SsidDialog` | WLAN group select + create/rename/delete; SSID list (security incl. OWE/Enhanced Open, band, guest, broadcast, VLAN). The SSID editor matches the legacy one field for field — basic (name, device type, bands, guest, None/OWE · WPA-Personal · WPA-Enterprise + RADIUS/NAS ID · PPSK with/without RADIUS) and Advanced / WLAN schedule / 802.11 rate control / MAC filter / multicast sections — with the vendor's dependency rules (WPA options per band, PMF, 802.11r, MLO). |
@@ -219,7 +249,7 @@ API layer instead.
 - `sim/omada-sim.mjs` (uses `ssh2` + `ws` from devDependencies, `npm run sim`, http://localhost:8090):
   serves `dist/` and proxies `/controller-api/*` to the REAL controller
   (`OMADA_UPSTREAM`, default `https://localhost:8043`). It merges three fake
-  devices into the device endpoints (pending/adopted grids, `devices/{mac}`,
+  devices into the device endpoints (pending/adopted grids, `sites/{sid}/eaps|switches|gateways/{mac}`,
   `dashboard/overview`, events/alerts, `alerts/num`) and answers
   adopt/add/forget/reboot/locate/forceProvision for their MACs itself.
   MACs are locally administered (`02-5A-…`), rows carry `simulated: true`.
@@ -295,7 +325,8 @@ not published; nginx forwards `location = /terminal/ws`, resolved lazily so
 nginx starts without it).
 - Refuses upgrades whose Origin ≠ Host (403).
 - The first message carries `{omadacId, token, siteId, mac}`; the gateway
-  calls the controller with the browser's cookie + token for `devices/{mac}`,
+  calls the controller with the browser's cookie + token for the device
+  (`sites/{sid}/eaps|switches|gateways/{mac}`, first that knows the MAC),
   `setting/ssh` and `setting` (device account). Signed out / unknown device /
   device not in site / not connected / SSH off → clear error, no connection.
 - Connects to the controller's IP for that device on `sshServerPort` with the
@@ -363,7 +394,8 @@ it — the earlier guesses in the UI were wrong and are fixed:
    fields identical, SSID included; the admin created in the wizard signs in, the
    backup's old password does not. Leftovers: stopped containers
    `omada-controller-test`, `omada-controller-test2` and volumes `omada-e2e-*`,
-   `omada-e2e2-*`, plus `omada-entrypoint-test` (removing them needs the user's OK).
+   `omada-e2e2-*`, plus `omada-entrypoint-test`, `omada-standalone-web-ui-1`, `omada-standalone-terminal-1`
+   (removing them needs the user's OK).
    **Container gotcha (fixed in the image, needs a controller rebuild to apply):** the
    old `CMD bash -c "tpeap start && tail …"` ran bash as PID 1, which ignores SIGTERM,
    so `docker stop` waited out the grace period and SIGKILLed jsvc, leaving

@@ -1,0 +1,33 @@
+# Web UI on its own, for a controller that already runs somewhere else
+# (a NAS, another host). The controller is not touched: this only adds the
+# dashboard and its terminal gateway, which talk to it over HTTPS.
+#
+#   cd web
+#   OMADA_CONTROLLER_URL=https://192.168.1.10:8043 \
+#     docker compose -f docker-compose.standalone.yml up -d --build
+#
+# or put the variables in web/.env (see .env.example). Then open
+# http://<this host>:8080 and sign in with the controller's admin account.
+
+services:
+  web-ui:
+    build:
+      context: .
+    ports:
+      - "${WEB_UI_PORT:-8080}:80"
+    environment:
+      # The controller's HTTPS management address: scheme, host, port, no path.
+      - OMADA_CONTROLLER_URL=${OMADA_CONTROLLER_URL:?Set OMADA_CONTROLLER_URL to your controller, e.g. https://192.168.1.10:8043}
+      - TERMINAL_GATEWAY_URL=http://terminal:8091
+    depends_on:
+      - terminal
+    restart: unless-stopped
+
+  # Device SSH terminal for the AP detail page. Optional: without it the rest
+  # of the UI works and only the Terminal tab reports an error.
+  terminal:
+    build:
+      context: ./terminal
+    environment:
+      - OMADA_CONTROLLER=${OMADA_CONTROLLER_URL}
+    restart: unless-stopped

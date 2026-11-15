@@ -1,0 +1,27 @@
+#!/bin/sh
+# Sourced by the nginx image's entrypoint (/docker-entrypoint.d/*.envsh run
+# in the entrypoint's own shell) before the templates are rendered, so it can
+# tidy the variables they use.
+
+# "https://nas:8043/" → "https://nas:8043": the template appends its own
+# paths, and a path in proxy_pass inside a regex location stops nginx.
+while [ "${OMADA_CONTROLLER_URL%/}" != "${OMADA_CONTROLLER_URL}" ]; do
+    OMADA_CONTROLLER_URL="${OMADA_CONTROLLER_URL%/}"
+done
+export OMADA_CONTROLLER_URL
+
+case "${OMADA_CONTROLLER_URL}" in
+    http://?*|https://?*) ;;
+    *)
+        echo "OMADA_CONTROLLER_URL must be the controller's address, like https://192.168.1.10:8043 (got '${OMADA_CONTROLLER_URL}')." >&2
+        exit 1
+        ;;
+esac
+case "${OMADA_CONTROLLER_URL#*://}" in
+    */*)
+        echo "OMADA_CONTROLLER_URL must not include a path (got '${OMADA_CONTROLLER_URL}'); use just scheme, host and port." >&2
+        exit 1
+        ;;
+esac
+
+echo "Omada web UI: controller API at ${OMADA_CONTROLLER_URL}"

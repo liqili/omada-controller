@@ -21,10 +21,16 @@ export async function login(req: LoginRequest): Promise<LoginResult> {
  */
 export async function logout(): Promise<void> {
   const token = tokenStore.get();
+  const omadacId = tokenStore.omadacId();
   tokenStore.clear();
   if (!token) return;
   try {
-    await api.post('/api/v2/logout', {}, { params: { token }, headers: { 'Csrf-Token': token }, timeout: 5000 });
+    // Omadac-scoped like every session call (vendor registry: system.logout =
+    // "/{omadacId}/api/v2/logout"); unscoped it answers -1600 and the
+    // controller session stays open. The store is already cleared, so the
+    // header is set here.
+    const path = omadacId ? `/${omadacId}/api/v2/logout` : '/api/v2/logout';
+    await api.post(path, {}, { headers: { 'Csrf-Token': token }, timeout: 5000 });
   } catch {
     // Already signed out server-side, or unreachable — nothing left to do.
   }

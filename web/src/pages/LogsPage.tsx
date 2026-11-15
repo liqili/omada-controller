@@ -15,7 +15,7 @@ import {
 import RefreshIcon from '@mui/icons-material/Refresh';
 import { useSite } from '../hooks/useSiteContextBridge';
 import { useLogNums, useLogs } from '../hooks/queries';
-import { LOG_LEVELS, LOG_MODULES, type LogEntry, type LogKind } from '../api/domains/logs';
+import { LOG_LEVELS, LOG_MODULES, logText, type LogEntry, type LogKind } from '../api/domains/logs';
 import { ResponsiveList } from '../components/ResponsiveList';
 import { PageTitle, apiErrorText } from '../components/SettingsKit';
 
@@ -29,6 +29,7 @@ const RANGES = [
 ];
 
 const LEVEL_COLOR: Record<string, 'error' | 'warning' | 'info'> = {
+  Critical: 'error',
   Error: 'error',
   Warning: 'warning',
   Information: 'info',
@@ -39,9 +40,12 @@ const PAGE_SIZE = 50;
 export default function LogsPage() {
   const { siteId } = useSite();
   const [kind, setKind] = useState<LogKind>('alerts');
-  const [hours, setHours] = useState(RANGES[1].hours);
+  // 30 days, as the legacy logs page opens (its first request spans exactly 30 days).
+  const [hours, setHours] = useState(RANGES[2].hours);
   const [level, setLevel] = useState('');
   const [module, setModule] = useState('');
+  // Alerts only; the vendor page opens on unresolved ones.
+  const [resolved, setResolved] = useState(false);
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -56,10 +60,11 @@ export default function LogsPage() {
       level: level || undefined,
       module: module || undefined,
       search: search || undefined,
+      resolved,
       page,
       pageSize: PAGE_SIZE,
     }),
-    [anchor, hours, level, module, search, page],
+    [anchor, hours, level, module, search, resolved, page],
   );
   const logs = useLogs(siteId, kind, query);
   const nums = useLogNums();
@@ -99,8 +104,20 @@ export default function LogsPage() {
           e.preventDefault();
           refilter(() => setSearch(searchInput.trim()));
         }}
-        sx={{ display: 'grid', gap: 1, gridTemplateColumns: { xs: '1fr 1fr', md: 'repeat(4, minmax(0, 1fr))' } }}
+        sx={{ display: 'grid', gap: 1, gridTemplateColumns: { xs: '1fr 1fr', md: `repeat(${kind === 'alerts' ? 5 : 4}, minmax(0, 1fr))` } }}
       >
+        {kind === 'alerts' && (
+          <TextField
+            select
+            size="small"
+            label="Status"
+            value={resolved ? 'resolved' : 'unresolved'}
+            onChange={(e) => refilter(() => setResolved(e.target.value === 'resolved'))}
+          >
+            <MenuItem value="unresolved">Unresolved</MenuItem>
+            <MenuItem value="resolved">Resolved</MenuItem>
+          </TextField>
+        )}
         <TextField select size="small" label="Period" value={hours} onChange={(e) => refilter(() => setHours(Number(e.target.value)))}>
           {RANGES.map((r) => (
             <MenuItem key={r.hours} value={r.hours}>
@@ -141,7 +158,7 @@ export default function LogsPage() {
           keyOf={(l) => l.id ?? `${l.time}-${l.key}`}
           emptyText={kind === 'alerts' ? 'No alerts in this period.' : 'No events in this period.'}
           columns={[
-            { header: 'Message', render: (l) => l.content ?? l.key ?? '—' },
+            { header: 'Message', render: (l) => logText(l) || '—' },
             { header: 'Time', render: (l) => (l.time ? new Date(l.time).toLocaleString() : '—') },
             {
               header: 'Level',

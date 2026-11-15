@@ -9,6 +9,7 @@ import {
   RADIO_ID,
   RADIO_LABEL,
   WIDTH_LABEL,
+  channelOptionValue,
   supportedRadios,
   widthOptions,
   type ApConfigSection,
@@ -17,6 +18,16 @@ import {
   type IpSetting,
   type RadioKey,
 } from '../../api/domains/ap';
+import type { RadioBand, WirelessParam } from '../../api/types';
+import { actualChannelNumber } from './detailFormat';
+
+const BAND_OF: Record<RadioKey, RadioBand> = { radioSetting2g: '2g', radioSetting5g: '5g', radioSetting5g2: '5g2', radioSetting6g: '6g' };
+
+/** "Auto (now 36)" while the saved setting is Auto and the radio is up, like legacy "Auto(36)". */
+function autoLabel(saved: string | undefined, draft: string | undefined, wp: WirelessParam | undefined, connected: boolean) {
+  const now = connected && saved === '0' && draft === '0' ? actualChannelNumber(wp) : undefined;
+  return now ? `Auto (now ${now})` : 'Auto';
+}
 
 // Settings that apply to this one access point and override the site-wide
 // ones. Each card saves its own section, like the vendor UI does.
@@ -121,17 +132,18 @@ function RadioCard({ ap, radio, siteId, toast }: { ap: ApDetail; radio: RadioKey
           sx={{ minWidth: 160 }}
           helperText={channels.isLoading ? 'Loading channels…' : list.length ? ' ' : 'This AP reported no channel list'}
         >
-          <MenuItem value="0">Auto</MenuItem>
+          <MenuItem value="0">{autoLabel(current.channel, d.channel, ap[`wp${BAND_OF[radio]}`] as WirelessParam | undefined, ap.statusCategory === 1)}</MenuItem>
           {list
-            .filter((c) => c.channelValue !== 0)
+            .filter((c) => channelOptionValue(c) !== '0')
             .map((c) => (
-              <MenuItem key={c.channelValue} value={String(c.channelValue)}>
-                {c.channelName ?? c.channelValue}
-                {c.freq ? ` · ${c.freq} MHz` : ''}
+              // Option value = item.value (what radioSetting.channel stores);
+              // label = channelName ("36 / 5180MHz"), as in the legacy form.
+              <MenuItem key={channelOptionValue(c)} value={channelOptionValue(c)}>
+                {c.channelName ?? (c.freq ? `${c.channelValue} / ${c.freq}MHz` : c.channelValue)}
               </MenuItem>
             ))}
-          {d.channel && d.channel !== '0' && !list.some((c) => String(c.channelValue) === d.channel) && (
-            <MenuItem value={d.channel}>{d.channel}</MenuItem>
+          {d.channel && d.channel !== '0' && !list.some((c) => channelOptionValue(c) === d.channel) && (
+            <MenuItem value={d.channel}>{channels.isLoading ? 'Loading…' : `Unlisted channel (${d.channel})`}</MenuItem>
           )}
         </TextField>
         <TextField

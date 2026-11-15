@@ -43,6 +43,7 @@ import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import ssh2 from 'ssh2';
 import { attachTerminal } from '../terminal/gateway.mjs';
@@ -109,8 +110,11 @@ const SEEDS = [
     latestFw: '5.1.9 Build 20250701 Rel. 40212',
     releaseLog: 'Bug fixes:\n1. Fixed LED schedule not applied after reboot.',
     // Simulates a device that still carries credentials from another
-    // controller: adoption fails until POST /sim/devices/{mac}/fix.
+    // controller: adoption fails on its login until it is adopted with
+    // `login` below (a single adopt then answers -39003, as a real controller
+    // does), or POST /sim/devices/{mac}/fix clears the fault.
     fault: 'Device username/password do not match',
+    login: { username: 'admin', password: 'garden-pass' },
   },
 ];
 
@@ -157,14 +161,18 @@ function defaultApCfg() {
   };
 }
 const RADIO_OF_BAND = { '2.4 GHz': 'radioSetting2g', '5 GHz': 'radioSetting5g' };
+// Same shape as the controller's channelInfo: radioSetting.channel stores
+// `value` (an index), not the channel number `channelValue`; the label is
+// channelName "36 / 5180MHz". Indexes deliberately differ from channel
+// numbers so mixing the two up shows.
+const channelEntry = (c, i, freq) => ({ value: i + 1, channelValue: c, channelName: `${c} / ${freq}MHz`, freq });
 const CHANNELS = {
-  0: Array.from({ length: 13 }, (_, i) => ({ channelValue: i + 1, channelName: String(i + 1), freq: 2412 + 5 * i })),
-  1: [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140].map((c) => ({
-    channelValue: c,
-    channelName: String(c),
-    freq: 5000 + 5 * c,
-  })),
+  0: Array.from({ length: 13 }, (_, i) => channelEntry(i + 1, i + 100, 2412 + 5 * i)),
+  1: [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140].map((c, i) => channelEntry(c, i, 5000 + 5 * c)),
 };
+/** Channel number for a radioSetting.channel value; auto ("0") settles on the first channel. */
+const channelNumber = (radioId, value) =>
+  value === '0' || value === undefined ? CHANNELS[radioId][0].channelValue : CHANNELS[radioId].find((c) => String(c.value) === String(value))?.channelValue;
 const WIDTHS = { radioSetting2g: ['2', '3', '4'], radioSetting5g: ['2', '3', '5', '6'] };
 const WIDTH_TEXT = { 2: '20 MHz', 3: '40 MHz', 4: '20/40 MHz', 5: '80 MHz', 6: '20/40/80 MHz' };
 const POWER_TEXT = { 0: 'low', 1: 'medium', 2: 'high', 4: 'auto' };
@@ -356,7 +364,7 @@ async function pullConfig(d, auth, reason, request) {
       d.wlanGroup = group?.name;
       d.wlanId = group?.id;
       const stored = group
-        ? asList(await upstreamJson(auth, `sites/${d.siteId}/setting/wlans/${group.id}/ssids`, { currentPage: 1, pageSize: 100 }))
+        ? asList(await upstreamJson(auth, `sites/${d.siteId}/setting/wlans/${group.id}/ssids`, { currentPage: 1, currentPageSize: 100 }))
         : [];
       // deviceType bit 1 = access points (missing → both). Gateway-only SSIDs never reach an AP.
       const ssids = stored.filter((s) => s.deviceType === undefined || s.deviceType & 1);
@@ -378,16 +386,16 @@ async function pullConfig(d, auth, reason, request) {
         items.push(
           r.radioEnable === false
             ? `${label} off`
-            : `${label} ch ${r.channel === '0' ? 'auto' : r.channel} · ${WIDTH_TEXT[r.channelWidth] ?? r.channelWidth} · ${r.txPowerLevel === 3 ? `${r.txPower} dBm` : POWER_TEXT[r.txPowerLevel]}`,
+            : `${label} ch ${r.channel === '0' ? 'auto' : channelNumber(label === '2.4 GHz' ? 0 : 1, r.channel)} ·${WIDTH_TEXT[r.channelWidth] ?? r.channelWidth} · ${r.txPowerLevel === 3 ? `${r.txPower} dBm` : POWER_TEXT[r.txPowerLevel]}`,
         );
       }
       items.push(d.cfg.ipSetting.mode === 'static' ? `Static IP ${d.cfg.ipSetting.configIp}` : 'IP by DHCP');
       const rf = await upstreamJson(auth, `sites/${d.siteId}/rfPlanning`).catch(() => undefined);
       if (rf) items.push(`Auto channel ${rf.channelDeployEnable ? 'on' : 'off'}`);
     } else {
-      const lan = await upstreamJson(auth, `sites/${d.siteId}/setting/lan/networks`, { currentPage: 1, pageSize: 100 });
+      const lan = await upstreamJson(auth, `sites/${d.siteId}/setting/lan/networks`, { currentPage: 1, currentPageSize: 100 });
       items.push(...asList(lan).map((nw) => `Network ${nw.name} (VLAN ${nw.vlan ?? 1})`));
-      const profiles = await upstreamJson(auth, `sites/${d.siteId}/setting/lan/profiles`, { currentPage: 1, pageSize: 100 });
+      const profiles = await upstreamJson(auth, `sites/${d.siteId}/setting/lan/profiles`, { currentPage: 1, currentPageSize: 100 });
       items.push(`${asList(profiles).length} port profiles`);
     }
     const site = await upstreamJson(auth, `sites/${d.siteId}/setting`).catch(() => undefined);
@@ -424,6 +432,8 @@ function adopt(d, siteId, auth) {
     async () => {
       if (d.fault) {
         setStatus(d, ST.ADOPT_FAILED);
+        // A login failure: not -1, so the UI asks for the device's username and
+        // password on retry (vendor isAdoptFactoryAp: -1 means no login needed).
         d.adoptFailType = 1;
         log(d, 'alerts', 'Warning', 'SIM_ADOPT_FAILED', `${d.name} (${d.mac}) failed to be adopted: ${d.fault}.`);
         d.gen++; // stop here
@@ -471,6 +481,140 @@ function forceProvision(d, auth) {
       log(d, 'events', 'Information', 'SIM_CONNECTED', `${d.name} finished provisioning.`);
     },
   ]);
+}
+
+// ── configuration results (Devices → Configuration Results) ──
+// Status values of the vendor page: 2 failed, 3 incompatible ("alert"),
+// 4 configuring, 5 preconfigure. Every adopted simulated AP has two settings
+// its firmware can't run; the switch failed to apply a VLAN until "Apply
+// again" (config/fullSync); a disconnected device has a pending
+// (preconfigure) change. Answered here alone: real devices' results aren't merged.
+const CFG = { FAIL: 2, ALERT: 3, CONFIGURING: 4, PRECONFIG: 5 };
+const CFG_SINCE = Date.now();
+
+function configFeatures(d) {
+  const out = [];
+  if (d.type === 'ap') {
+    out.push(
+      {
+        status: CFG.ALERT,
+        feature: 'ap_ssid',
+        languageKey: 'MENU.WLAN',
+        uiPosition: 'WLAN',
+        expandable: true,
+        featureItemSum: 1,
+        components: [{ component: 'ap_ssid_5G', name: 'SIM-PPSK-Guests', subEntryLimit: 16 }],
+      },
+      {
+        status: CFG.ALERT,
+        feature: 'ap_ledSchedule',
+        languageKey: 'SITE_SETTINGS.LED_SCHEDULE',
+        uiPosition: 'SITE_SETTINGS-LED',
+        unsupportCaps: ['LED schedule'],
+      },
+    );
+  }
+  if (d.type === 'switch' && !d.configSynced) {
+    out.push({
+      status: CFG.FAIL,
+      feature: 'osw_vlan',
+      languageKey: 'SWITCH_SETTINGS.VLAN_INTERFACE',
+      uiPosition: 'WIRED_NETWORKS-LAN',
+      expandable: true,
+      featureItemSum: 1,
+      operationList: [3],
+      timeList: [CFG_SINCE],
+      uiErrorCodeList: ['osw_-6'],
+      components: [{ component: 'osw_vlan', name: 'VLAN 20', operation: 3, time: CFG_SINCE, uiErrorCode: 'osw_-6' }],
+    });
+  }
+  if (categoryOf(d.status) !== 1) {
+    out.push({
+      status: CFG.PRECONFIG,
+      feature: `${d.type}_general`,
+      languageKey: 'DEVICE.GENERAL_CONFIG',
+      operationList: [3],
+      timeList: [CFG_SINCE],
+    });
+  }
+  return out;
+}
+
+const cfgInt = (q, k) => (/^\d+$/.test(q.get(k) ?? '') ? Number(q.get(k)) : undefined);
+const cfgStatus = (q) => {
+  const v = cfgInt(q, 'status');
+  return Object.values(CFG).includes(v) ? v : undefined;
+};
+const configRow = (d) => ({
+  mac: d.mac,
+  name: d.name,
+  type: d.type,
+  model: d.model,
+  modelVersion: d.hwVersion,
+  needFullSync: d.type === 'switch' && !d.configSynced,
+  supportConfigSync: true,
+  supportRunningConfig: d.type === 'switch',
+});
+
+/** GET config-result handlers; undefined when the path isn't one of them. */
+function configResult(api, q) {
+  const bad = { errorCode: -1001, msg: '[Simulated] Invalid request parameters.' };
+  const grid = api.match(/^sites\/([^/]+)\/config-result\/devices$/);
+  if (grid) {
+    // The vendor page sends currentPage/currentPageSize/status (+ filters.deviceType, name, mac).
+    const page = cfgInt(q, 'currentPage');
+    const size = cfgInt(q, 'currentPageSize');
+    const status = cfgStatus(q);
+    const type = q.get('filters.deviceType');
+    if (!page || !size || !status || q.has('pageSize') || (type !== null && !['1,2', '3'].includes(type))) return bad;
+    const ofType = (d) => (type === '3' ? d.type === 'ap' : type === '1,2' ? d.type !== 'ap' : true);
+    const has = (d, st) => configFeatures(d).some((f) => f.status === st);
+    const name = q.get('name')?.toLowerCase();
+    const mac = q.get('mac')?.toUpperCase();
+    const all = adoptedIn(grid[1]);
+    const rows = all
+      .filter((d) => ofType(d) && has(d, status))
+      .filter((d) => (!name || d.name.toLowerCase().includes(name)) && (!mac || d.mac.includes(mac)));
+    const inType = all.filter(ofType);
+    const inStatus = all.filter((d) => has(d, status));
+    return ok({
+      currentPage: page,
+      currentSize: size,
+      totalRows: rows.length,
+      onlyNotificationData: false,
+      statistic: {
+        all: inStatus.length,
+        osgAndOsw: inStatus.filter((d) => d.type !== 'ap').length,
+        ap: inStatus.filter((d) => d.type === 'ap').length,
+        fail: inType.filter((d) => has(d, CFG.FAIL)).length,
+        alert: inType.filter((d) => has(d, CFG.ALERT)).length,
+        configuring: 0,
+        preConfig: inType.filter((d) => has(d, CFG.PRECONFIG)).length,
+      },
+      data: rows.slice((page - 1) * size, page * size).map(configRow),
+    });
+  }
+  const feat = api.match(/^sites\/([^/]+)\/config-result\/device\/([0-9A-F-]{17})\/feature$/);
+  if (feat && devices.has(feat[2])) {
+    const status = cfgStatus(q);
+    if (!status) return bad;
+    const list = configFeatures(devices.get(feat[2]))
+      .filter((f) => f.status === status)
+      .map(({ status: _s, components: _c, ...f }) => f);
+    return ok({ deviceFunctionList: list });
+  }
+  const comp = api.match(/^sites\/([^/]+)\/config-result\/devices\/([0-9A-F-]{17})\/feature\/grid$/);
+  if (comp && devices.has(comp[2])) {
+    const page = cfgInt(q, 'currentPage');
+    const size = cfgInt(q, 'currentPageSize');
+    const status = cfgStatus(q);
+    const feature = q.get('feature');
+    if (!page || !size || !status || !feature) return bad;
+    const f = configFeatures(devices.get(comp[2])).find((x) => x.status === status && x.feature === feature);
+    const rows = f?.components ?? [];
+    return ok({ currentPage: page, currentSize: size, totalRows: rows.length, data: rows.slice((page - 1) * size, page * size) });
+  }
+  return undefined;
 }
 
 function reboot(d, auth) {
@@ -577,6 +721,53 @@ function describeWrite(method, resource, body) {
 
 // ── JSON views ────────────────────────────────────────────────────────────
 
+function uptimeFields(s) {
+  const d = Math.floor(s / 86400);
+  const text = `${d ? `${d}day(s) ` : ''}${Math.floor((s % 86400) / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
+  return { uptime: text, uptimeLong: s };
+}
+
+/**
+ * Live fields the controller's detail VOs carry for a connected device
+ * (ApDetailVO wp2g/wp5g, radioTraffic2g/5g, lanTraffic, wiredUplink, cpu/mem), so the
+ * dashboard's Details tab has the same data to show as on real hardware.
+ */
+function liveDetail(d) {
+  const secs = d.connectedAt ? Math.round((Date.now() - d.connectedAt) / 1000) : 0;
+  const traffic = (k) => ({
+    rxPkts: 1200 * k + secs, rx: 1_500_000 * k + secs * 900, rxDropPkts: k, rxErrPkts: 0,
+    txPkts: 900 * k + secs, tx: 2_100_000 * k + secs * 1200, txDropPkts: 0, txErrPkts: 0,
+  });
+  const out = { cpuUtil: 3, memUtil: 41, publicIp: d.ip, ipv6List: [] };
+  const uplink = [...devices.values()].find((x) => x.type === 'switch' && x.siteId === d.siteId && x !== d);
+  if (d.type !== 'switch') {
+    out.wiredUplink = {
+      uplinkMac: uplink?.mac, name: uplink?.name ?? 'Upstream switch', type: 'switch', duplex: 2, rate: '1000', // a string on real controllers
+      upPackets: 900 + secs, upBytes: 2_000_000 + secs * 1200, downPackets: 1200 + secs, downBytes: 1_400_000 + secs * 900, activity: 1450,
+    };
+  }
+  if (d.type === 'ap') {
+    out.lanTraffic = traffic(3);
+    for (const label of d.bands) {
+      const b = label === '2.4 GHz' ? '2g' : '5g';
+      const r = d.cfg[RADIO_OF_BAND[label]];
+      if (r.radioEnable === false) continue;
+      const radioId = b === '2g' ? 0 : 1;
+      const num = channelNumber(radioId, r.channel);
+      const freq = CHANNELS[radioId].find((c) => c.channelValue === num)?.freq;
+      out[`wp${b}`] = {
+        actualChannel: `${num} / ${freq}MHz`,
+        rdMode: b === '2g' ? 'b/g/n/ax mixed' : 'a/n/ac/ax mixed',
+        bandWidth: { 2: '20MHz', 3: '40MHz', 4: '20MHz', 5: '80MHz', 6: '80MHz' }[r.channelWidth] ?? '20MHz',
+        txPower: r.txPowerLevel === 3 ? r.txPower : b === '2g' ? 20 : 23,
+        rxUtil: b === '2g' ? 9 : 2, txUtil: b === '2g' ? 4 : 1, interUtil: b === '2g' ? 14 : 0,
+      };
+      out[`radioTraffic${b}`] = traffic(b === '2g' ? 1 : 2);
+    }
+  }
+  return out;
+}
+
 function row(d) {
   const connected = categoryOf(d.status) === 1;
   return {
@@ -592,9 +783,11 @@ function row(d) {
     ip: d.ip,
     status: d.status,
     statusCategory: categoryOf(d.status),
+    locateEnable: connected && Boolean(d.locateEnable),
     adoptFailType: d.status === ST.ADOPT_FAILED ? d.adoptFailType : undefined,
     site: d.siteId,
-    uptime: connected && d.connectedAt ? Math.round((Date.now() - d.connectedAt) / 1000) : undefined,
+    // Same shape as the controller: display string + seconds in uptimeLong.
+    ...(connected && d.connectedAt ? uptimeFields(Math.round((Date.now() - d.connectedAt) / 1000)) : {}),
     lastSeen: Date.now(),
     clientNum: 0,
     wlanGroup: d.type === 'ap' ? d.wlanGroup : undefined,
@@ -604,6 +797,7 @@ function row(d) {
     provision: d.provision,
     needUpgrade: Boolean(d.latestFw && d.latestFw !== d.firmwareVersion),
     latestVersion: d.latestFw,
+    ...(connected ? liveDetail(d) : {}),
     simulated: true,
   };
 }
@@ -635,6 +829,32 @@ function relay(res, up, bodyOverride) {
   headers['content-length'] = String(body.length);
   res.writeHead(up.status, headers);
   res.end(body);
+}
+
+/** Minimal multipart/form-data parser: [{name, filename?, data: Buffer}]. */
+function multipartParts(body, contentType = '') {
+  const boundary = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  if (!boundary) return [];
+  const sep = Buffer.from(`--${boundary[1] ?? boundary[2]}`);
+  const parts = [];
+  let at = body.indexOf(sep);
+  while (at !== -1) {
+    const start = at + sep.length;
+    const next = body.indexOf(sep, start);
+    if (next === -1) break;
+    const chunk = body.subarray(start + 2, next - 2); // drop CRLF after the boundary and before the next
+    const split = chunk.indexOf('\r\n\r\n');
+    if (split !== -1) {
+      const head = chunk.subarray(0, split).toString('latin1');
+      parts.push({
+        name: head.match(/name="([^"]*)"/)?.[1],
+        filename: head.match(/filename="([^"]*)"/)?.[1],
+        data: chunk.subarray(split + 4),
+      });
+    }
+    at = next;
+  }
+  return parts;
 }
 
 const ok = (result) => ({ errorCode: 0, msg: 'Success.', ...(result === undefined ? {} : { result }) });
@@ -672,6 +892,8 @@ function inWindow(entry, q, kind) {
   if (q.get('filters.level') && q.get('filters.level') !== entry.level) return false;
   if (q.get('filters.module') && q.get('filters.module') !== entry.module) return false;
   if (q.get('filters.archived') === 'true' && !entry.archived) return false;
+  // logs/alerts filters on resolved (the simulator never resolves alerts).
+  if (q.get('filters.resolved') === 'true') return false;
   const key = q.get('searchKey');
   if (key && !entry.content.toLowerCase().includes(key.toLowerCase())) return false;
   return true;
@@ -700,28 +922,75 @@ async function handleApi(req, res) {
   const cmd = api.match(/^sites\/([^/]+)\/cmd\/devices\/([0-9A-F-]{17})\/(forget|reboot|locate|forceProvision)$/);
   if (method === 'POST' && cmd && devices.has(cmd[2])) {
     const d = devices.get(cmd[2]);
-    if (cmd[3] === 'forget') forget(d);
+    if (cmd[3] === 'forget') {
+      // Vendor body is {mac}.
+      if (json?.mac !== d.mac) return sendJson(res, 200, { errorCode: -1001, msg: '[Simulated] Invalid request parameters.' });
+      forget(d);
+    }
     else if (categoryOf(d.status) !== 1) return sendJson(res, 200, { errorCode: -39002, msg: '[Simulated] The device is not connected.' });
     else if (cmd[3] === 'reboot') reboot(d, auth);
     else if (cmd[3] === 'forceProvision') forceProvision(d, auth);
-    else log(d, 'events', 'Information', 'SIM_LOCATE', `${d.name} is flashing its LED.`);
+    else {
+      // The real controller needs {locateEnable: boolean} (found 2026-11-15: an
+      // empty body fails); it answers with the updated device.
+      if (typeof json?.locateEnable !== 'boolean') return sendJson(res, 200, { errorCode: -1001, msg: '[Simulated] Invalid request parameters.' });
+      d.locateEnable = json.locateEnable;
+      log(d, 'events', 'Information', 'SIM_LOCATE', `${d.name} ${d.locateEnable ? 'is flashing' : 'stopped flashing'} its LED.`);
+      return sendJson(res, 200, ok(row(d)));
+    }
     return sendJson(res, 200, ok());
   }
 
-  const adoptCmd = api.match(/^sites\/([^/]+)\/cmd\/devices\/adopt$/);
-  if (method === 'POST' && adoptCmd && Array.isArray(json?.macList)) {
-    const sim = json.macList.filter((mac) => devices.has(mac));
-    const real = json.macList.filter((mac) => !devices.has(mac));
-    sim.forEach((mac) => adopt(devices.get(mac), adoptCmd[1], auth));
-    if (!real.length) return sendJson(res, 200, ok());
-    const up = await forward(req, Buffer.from(JSON.stringify({ ...json, macList: real })), upstreamPath);
-    return relay(res, up);
+  // Adoption, with the vendor UI's bodies (found 2026-11-15; {macList} was
+  // never accepted by a real controller):
+  //   cmd/devices/adopt      {mac, username?, password?}
+  //   cmd/devices/batchAdopt {macs, deviceSeriesType, username?, password?}
+  // A device that is not on factory settings (managed by others, or failed on
+  // its login) needs username + password, as the vendor UI asks for them.
+  const adoptCmd = api.match(/^sites\/([^/]+)\/cmd\/devices\/(adopt|batchAdopt)$/);
+  if (method === 'POST' && adoptCmd) {
+    const macs = adoptCmd[2] === 'adopt' ? (typeof json?.mac === 'string' ? [json.mac] : null) : Array.isArray(json?.macs) ? json.macs : null;
+    if (!macs) return sendJson(res, 200, { errorCode: -1001, msg: '[Simulated] Invalid request parameters.' });
+    const sim = macs.filter((mac) => devices.has(mac));
+    if (sim.length) {
+      // The right device login clears a login fault.
+      for (const mac of sim) {
+        const d = devices.get(mac);
+        if (d.fault && d.login && json.username === d.login.username && json.password === d.login.password) d.fault = undefined;
+      }
+      // One device with a wrong or missing login: refused at once, the way the
+      // user's NAS controller answered (2026-11-15). A batch fails per device later.
+      const one = adoptCmd[2] === 'adopt' && devices.get(sim[0]);
+      if (one && one.fault && one.login && [ST.PENDING, ST.ADOPT_FAILED].includes(one.status)) {
+        setStatus(one, ST.ADOPT_FAILED);
+        one.adoptFailType = 1;
+        log(one, 'alerts', 'Warning', 'SIM_ADOPT_FAILED', `${one.name} (${one.mac}) failed to be adopted: ${one.fault}.`);
+        return sendJson(res, 200, {
+          errorCode: -39003,
+          msg: '[Simulated] Failed to adopt the device because the username or password is incorrect.',
+          result: { mac: one.mac, status: one.status, statusCategory: categoryOf(one.status) },
+        });
+      }
+      sim.forEach((mac) => adopt(devices.get(mac), adoptCmd[1], auth));
+      const real = macs.filter((mac) => !devices.has(mac));
+      if (!real.length) return sendJson(res, 200, ok());
+      const rest = adoptCmd[2] === 'adopt' ? { ...json, mac: real[0] } : { ...json, macs: real };
+      return relay(res, await forward(req, Buffer.from(JSON.stringify(rest)), upstreamPath));
+    }
   }
 
-  // Single-device variant of adopt ("add by MAC").
-  const addCmd = api.match(/^sites\/([^/]+)\/cmd\/devices\/add$/);
-  if (method === 'POST' && addCmd && devices.has(json?.mac)) {
-    adopt(devices.get(json.mac), addCmd[1], auth);
+  // ── configuration results ──
+  if (method === 'GET' && api.includes('/config-result/')) {
+    const r = configResult(api, url.searchParams);
+    if (r) return sendJson(res, 200, r);
+  }
+  const fullSync = api.match(/^sites\/([^/]+)\/devices\/([0-9A-F-]{17})\/config\/fullSync$/);
+  if (method === 'POST' && fullSync && devices.has(fullSync[2])) {
+    const d = devices.get(fullSync[2]);
+    if (categoryOf(d.status) !== 1) return sendJson(res, 200, { errorCode: -39002, msg: '[Simulated] The device is not connected.' });
+    d.configSynced = true;
+    forceProvision(d, auth);
+    log(d, 'events', 'Information', 'SIM_FULL_SYNC', `${d.name} had its full configuration applied again.`);
     return sendJson(res, 200, ok());
   }
 
@@ -754,7 +1023,7 @@ async function handleApi(req, res) {
         const next = { ...d.cfg[key], ...body[key] };
         const radioId = key === 'radioSetting2g' ? 0 : 1;
         if (!WIDTHS[key].includes(String(next.channelWidth))) return bad(`channelWidth ${next.channelWidth} is not valid for this radio.`);
-        if (next.channel !== '0' && !CHANNELS[radioId].some((c) => String(c.channelValue) === String(next.channel))) return bad(`Channel ${next.channel} is not available.`);
+        if (next.channel !== '0' && !CHANNELS[radioId].some((c) => String(c.value) === String(next.channel))) return bad(`Channel ${next.channel} is not available.`);
         if (![0, 1, 2, 3, 4].includes(next.txPowerLevel)) return bad('txPowerLevel must be 0–4.');
         if (next.txPowerLevel === 3 && !(next.txPower >= 1 && next.txPower <= 30)) return bad('Custom power must be 1–30 dBm.');
         d.cfg[key] = next;
@@ -808,12 +1077,28 @@ async function handleApi(req, res) {
   }
   // The upload has no MAC in it; the vendor UI always calls checkFirmware
   // first, so the simulator takes the upload if that call named one of its devices.
+  // Vendor protocol (two POSTs, both multipart): data={"md5"} alone first —
+  // answered without a fileId unless that file is already held — then
+  // data={"md5"} + file. A request without md5 fails, as on a real controller.
   const upload = api.match(/^files\/sites\/([^/]+)\/device\/upgrade$/);
   if (method === 'POST' && upload && uploadFor) {
     const d = devices.get(uploadFor);
+    const parts = multipartParts(body, req.headers['content-type']);
+    let md5;
+    try {
+      md5 = JSON.parse(parts.find((p) => p.name === 'data')?.data.toString('utf8') ?? '{}').md5;
+    } catch {}
+    if (!/^[0-9a-f]{32}$/.test(md5 ?? '')) {
+      uploadFor = undefined;
+      return sendJson(res, 200, { errorCode: -1001, msg: '[Simulated] Invalid request parameters (no md5).' });
+    }
+    const filePart = parts.find((p) => p.name === 'file' && p.filename !== undefined);
+    if (!filePart) return sendJson(res, 200, ok({})); // step 1: not held, send the file
     uploadFor = undefined;
-    const head = body.subarray(0, 2048).toString('latin1');
-    const name = head.match(/filename="([^"]+)"/)?.[1] ?? '';
+    const name = filePart.filename;
+    if (createHash('md5').update(filePart.data).digest('hex') !== md5) {
+      return sendJson(res, 200, { errorCode: -1001, msg: '[Simulated] The file does not match its md5.' });
+    }
     if (!/\.bin$/i.test(name)) return sendJson(res, 200, { errorCode: -39301, msg: '[Simulated] Upload a .bin firmware file.' });
     // Real controllers read the model from inside the image; the simulator uses the file name.
     if (!name.toUpperCase().replace(/[-_]/g, '').includes(d.model.toUpperCase().replace(/[-_]/g, ''))) {
@@ -821,7 +1106,7 @@ async function handleApi(req, res) {
     }
     const version = name.match(/(\d+\.\d+\.\d+)/)?.[1];
     const fileId = `simfw-${++logSeq}`;
-    uploads.set(fileId, { mac: d.mac, name, size: body.length, version: version ? `${version} (from ${name})` : `custom (${name})` });
+    uploads.set(fileId, { mac: d.mac, name, size: filePart.data.length, version: version ? `${version} (from ${name})` : `custom (${name})` });
     return sendJson(res, 200, ok({ fileId }));
   }
   const dropFile = api.match(/^files\/sites\/([^/]+)\/device\/upgrade\/(simfw-\d+)$/);
@@ -840,8 +1125,16 @@ async function handleApi(req, res) {
     return sendJson(res, 200, ok({ upgradeId: `simup-${++logSeq}` }));
   }
 
-  const detail = api.match(/^devices\/([0-9A-F-]{17})$/);
-  if (method === 'GET' && detail && devices.has(detail[1])) return sendJson(res, 200, ok(row(devices.get(detail[1]))));
+  // Switch / gateway detail, like eaps/{mac} above. (The controller has no
+  // controller-level devices/{mac}; the simulator must not invent one.)
+  const wired = api.match(/^sites\/([^/]+)\/(switches|gateways)\/([0-9A-F-]{17})$/);
+  if (method === 'GET' && wired && devices.has(wired[3])) {
+    const d = devices.get(wired[3]);
+    if (d.type !== (wired[2] === 'switches' ? 'switch' : 'gateway') || !d.siteId) {
+      return sendJson(res, 200, { errorCode: wired[2] === 'switches' ? -39700 : -39501, msg: '[Simulated] Device does not exist.' });
+    }
+    return sendJson(res, 200, ok(row(d)));
+  }
 
   // ── everything else goes to the real controller ──
   const up = await forward(req, body, upstreamPath);
@@ -902,12 +1195,12 @@ async function handleApi(req, res) {
     add('availablePorts', sw.reduce((n, d) => n + d.ports - 1, 0));
   } else if (/^sites\/[^/]+\/alerts\/num$/.test(api)) {
     result.alertNum = (result.alertNum ?? 0) + logs.filter((l) => l.kind === 'alerts' && !l.archived && l.siteId === siteOf(api)).length;
-  } else if (/^(sites\/[^/]+\/)?(events|alerts)$/.test(api) && result) {
+  } else if (/^(sites\/[^/]+\/)?(logs\/)?(events|alerts)$/.test(api) && result) {
     const kind = api.endsWith('events') ? 'events' : 'alerts';
     const site = siteOf(api);
     const sim = logs.filter((l) => (!site || l.siteId === site) && inWindow(l, q, kind));
     if (Number(q.get('currentPage') ?? 1) <= 1) {
-      result.data = [...sim, ...(result.data ?? [])].slice(0, Number(q.get('pageSize') ?? 50));
+      result.data = [...sim, ...(result.data ?? [])].slice(0, Number(q.get('currentPageSize') ?? 50));
     }
     result.totalRows = (result.totalRows ?? 0) + sim.length;
   } else {
@@ -950,8 +1243,8 @@ function handleControl(req, res) {
 
 const hostKey = ssh2.utils.generateKeyPairSync('ed25519').private;
 
-function shellFor(d, stream) {
-  const prompt = () => stream.write(`\r\n${d.name}# `);
+function shellFor(d, stream, { banner, quiet = false } = {}) {
+  const prompt = () => !quiet && stream.write(`\r\n${d.name}# `);
   const out = (text) => stream.write(text.replace(/\n/g, '\r\n'));
   const uptime = () => {
     const sec = d.connectedAt ? Math.round((Date.now() - d.connectedAt) / 1000) : 0;
@@ -986,7 +1279,7 @@ function shellFor(d, stream) {
     uptime: () => out(`\nup ${uptime()}`),
   };
   let line = '';
-  out(`\nWelcome to ${d.showModel} (${d.name}) — simulated by omada-sim. Type "help".\n`);
+  if (!quiet) out(`\nWelcome to ${d.showModel} (${d.name}) — simulated by omada-sim.${banner ? ` ${banner}` : ''} Type "help".\n`);
   prompt();
   stream.on('data', (chunk) => {
     for (const ch of chunk.toString('utf8')) {
@@ -1050,6 +1343,15 @@ for (const seed of SEEDS) {
           session.on('pty', (acc) => acc?.());
           session.on('window-change', (acc) => acc?.());
           session.on('shell', (acc) => shellFor(d, acc()));
+          // `ssh -t device sh` (the gateway's startup command): "sh" opens the
+          // shell; any other command runs once and the channel closes.
+          session.on('exec', (acc, _rej, info) => {
+            const stream = acc();
+            const cmd = info.command.trim();
+            log(d, 'events', 'Information', 'SIM_SSH_EXEC', `${d.account.username} ran "${cmd}" on ${d.name} over SSH.`);
+            shellFor(d, stream, { banner: cmd === 'sh' ? `Started by "${cmd}".` : undefined, quiet: cmd !== 'sh' });
+            if (cmd !== 'sh') stream.emit('data', Buffer.from(`${cmd}\rexit\r`));
+          });
         });
       })
       .on('error', () => {});
@@ -1074,7 +1376,6 @@ const server = http.createServer((req, res) => {
 attachTerminal(server, {
   controllerGet: async (apiPath, { cookie, token }) => {
     const url = new URL(`http://127.0.0.1:${PORT}/controller-api${apiPath}`);
-    url.searchParams.set('token', token);
     const res = await fetch(url, { headers: { accept: 'application/json', 'csrf-token': token, ...(cookie ? { cookie } : {}) }, redirect: 'manual' });
     if (res.status !== 200) throw new Error(res.status === 302 ? 'not signed in' : `HTTP ${res.status}`);
     const json = await res.json();

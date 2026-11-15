@@ -1,4 +1,4 @@
-import { api, scoped, unwrap } from '../client';
+import { api, getAllPages, scoped, unwrap } from '../client';
 import type { Site } from '../types';
 
 interface GridResult<T> {
@@ -8,16 +8,14 @@ interface GridResult<T> {
 const norm = (s: Site): Site => ({ ...s, _id: (s.id ?? s._id ?? '') as string });
 
 // Verified live against v5.15.6.7:
-//   GET /{omadacId}/api/v2/sites?currentPage=1&pageSize=100
+//   GET /{omadacId}/api/v2/sites?currentPage=1&currentPageSize=100
 //     → {errorCode:0, result:{totalRows, currentPage, data:[…]}}  (multi-site)
 //   GET /{omadacId}/api/v2/sites/default
 //     → {errorCode:0, result:{id, omadacId, primary:true, name:"Default"}}
 //     (single-site / basic mode — the grid can stay empty; use the default)
 export async function listSites(): Promise<Site[]> {
   try {
-    const grid = await unwrap<GridResult<Site>>(
-      api.get(scoped('/api/v2/sites'), { params: { currentPage: 1, pageSize: 100 } }),
-    );
+    const grid = await getAllPages<GridResult<Site>>(scoped('/api/v2/sites'));
     const rows = (grid?.data ?? []).map(norm).filter((s) => s._id);
     if (rows.length) return rows;
   } catch {

@@ -1,4 +1,4 @@
-import { api, scoped, unwrap } from '../client';
+import { api, getAllPages, scoped, unwrap } from '../client';
 
 // Site-scoped settings. Everything lives under
 //   /{omadacId}/api/v2/sites/{siteId}/setting[/<resource>]
@@ -76,8 +76,7 @@ export async function getSettingList<T = Record<string, unknown>>(
   resource: string,
   params: Record<string, unknown> = {},
 ): Promise<SettingList<T>> {
-  const result = await getSetting<unknown>(siteId, resource, { currentPage: 1, pageSize: 100, ...params });
-  return normalizeList<T>(result);
+  return normalizeList<T>(await getAllPages(sitePath(siteId, resource), params));
 }
 
 /** Scenario names a site can be tagged with. The list starts with a null entry. */

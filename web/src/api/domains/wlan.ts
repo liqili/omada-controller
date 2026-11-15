@@ -1,4 +1,4 @@
-import { api, scoped, unwrap } from '../client';
+import { api, getAllPages, scoped, unwrap } from '../client';
 
 // Wireless networks — WLAN groups and their SSIDs.
 // All verbs below were live-verified against controller v5.15.6.7 on
@@ -8,7 +8,7 @@ import { api, scoped, unwrap } from '../client';
 //   POST   sites/{sid}/setting/wlans        {name, clone}    → {wlanId}
 //   PATCH  sites/{sid}/setting/wlans/{wlanId} {name}
 //   DELETE sites/{sid}/setting/wlans/{wlanId}
-//   GET    sites/{sid}/setting/wlans/{wlanId}/ssids?currentPage&pageSize
+//   GET    sites/{sid}/setting/wlans/{wlanId}/ssids?currentPage&currentPageSize
 //   POST   sites/{sid}/setting/wlans/{wlanId}/ssids          → {ssidId}
 //   PATCH  sites/{sid}/setting/wlans/{wlanId}/ssids/{ssidId} (full body, see ssidForm.ts)
 //   DELETE sites/{sid}/setting/wlans/{wlanId}/ssids/{ssidId}
@@ -136,8 +136,8 @@ export async function deleteWlanGroup(siteId: string, wlanId: string): Promise<v
 }
 
 export async function listSsids(siteId: string, wlanId: string): Promise<SsidList> {
-  const r = await unwrap<{ data?: Ssid[]; totalRows?: number } & Omit<SsidList, 'ssids' | 'total'>>(
-    api.get(wlans(siteId, `/${wlanId}/ssids`), { params: { currentPage: 1, pageSize: 100 } }),
+  const r = await getAllPages<{ data?: Ssid[]; totalRows?: number } & Omit<SsidList, 'ssids' | 'total'>>(
+    wlans(siteId, `/${wlanId}/ssids`),
   );
   const { data, totalRows, ...counts } = r ?? {};
   return { ssids: data ?? [], total: totalRows ?? data?.length ?? 0, ...counts };
