@@ -395,9 +395,12 @@ it — the earlier guesses in the UI were wrong and are fixed:
 4. **Accounts** — add/edit/delete built from the vendor Admin page (§ API
    table); try each once on a real controller. Not done: inviting cloud
    (TP-Link ID) accounts, custom roles.
-5. **SSID extras** — done (§6a). Still missing: creating rate-limit profiles,
-   time ranges, MAC groups and PPSK profiles from inside the editor (the
-   vendor has "create new" shortcuts; here they must exist already).
+5. **SSID extras** — done (§6a). Time ranges can be created from the WLAN
+   schedule section (`wlan/TimeRangeDialog`, `api/domains/timeRange.ts`;
+   POST `setting/profiles/timeranges` → `{profileId}`, verified live
+   2026-11-16). Still missing: creating rate-limit profiles, MAC groups and
+   PPSK profiles from inside the editor, and a Profiles page to edit or
+   delete time ranges (PATCH/DELETE `…/timeranges/{id}`).
 6. **Firmware upload / scheduled upgrades**, **Insight** page, notification
    matrix (`logs/notification`), webhook write verb.
 7. **Backup restore — verified 2026-11-14** on a fresh controller (same image, empty

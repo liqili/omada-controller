@@ -75,6 +75,7 @@ import {
   type ConfigResultQuery,
   type ConfigStatus,
 } from '../api/domains/configResult';
+import { createTimeRange, type TimeRangeForm } from '../api/domains/timeRange';
 import type { Device } from '../api/types';
 import { deviceStatus } from '../components/StatusChip';
 
@@ -279,6 +280,15 @@ export function useSsidLookups(siteId: string | undefined, enabled: boolean) {
     queryFn: () => getSsidLookups(siteId!),
     enabled: Boolean(siteId) && enabled,
     staleTime: 0,
+  });
+}
+
+/** New time range from the SSID editor; refreshes the editor's lookups. Resolves to its id. */
+export function useCreateTimeRange(siteId: string | undefined) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (f: TimeRangeForm) => (siteId ? createTimeRange(siteId, f) : noSite()),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ssidLookups', siteId] }),
   });
 }
 

@@ -26,10 +26,12 @@ import {
   useMediaQuery,
   useTheme,
 } from '@mui/material';
+import AddIcon from '@mui/icons-material/Add';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
 import { useSsidLookups } from '../../hooks/queries';
+import { TimeRangeDialog } from './TimeRangeDialog';
 import type { RateLimitProfile, Ssid, SsidList, WlanGroupList } from '../../api/domains/wlan';
 import {
   ALL_BANDS,
@@ -264,6 +266,9 @@ export default function SsidDialog({
   const [touched, setTouched] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [newRange, setNewRange] = useState(false);
+  /** Name of a just-created time range to select once the list has it. */
+  const [pendingRange, setPendingRange] = useState<string | null>(null);
 
   // Load once the lookups are in (the default rate-limit profile and 6 GHz
   // presence decide the new-SSID defaults, as in the vendor form).
@@ -282,6 +287,15 @@ export default function SsidDialog({
   const toggle = (id: string) => setOpen((o) => ({ ...o, [id]: !isOpen(id) }));
 
   const set = (patch: Partial<SsidForm>) => setForm((f) => (f && ctx ? applyChange(f, patch, ctx) : f));
+
+  // A new time range whose id the controller didn't return: select it by name once listed.
+  useEffect(() => {
+    const t = pendingRange && L?.timeRanges.find((r) => r.name === pendingRange);
+    if (!t) return;
+    setPendingRange(null);
+    set({ scheduleId: t.id });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingRange, L]);
 
   const title = row ? `Edit ${row.name}` : 'Create SSID';
   if (!form || !ctx || !L) {
@@ -776,10 +790,25 @@ export default function SsidDialog({
                     onChange={(v) => set({ scheduleId: v })}
                     options={L.timeRanges.map((t) => ({ value: t.id, label: t.name }))}
                     error={shown.scheduleId}
-                    helperText={L.timeRanges.length ? undefined : 'No time ranges yet — add one under Profiles in the controller.'}
+                    helperText={L.timeRanges.length ? undefined : 'No time ranges yet — create one below.'}
                   />
+                  <Box>
+                    <Button size="small" startIcon={<AddIcon />} onClick={() => setNewRange(true)}>
+                      New time range
+                    </Button>
+                  </Box>
                 </>
               )}
+              <TimeRangeDialog
+                open={newRange}
+                siteId={siteId}
+                onClose={() => setNewRange(false)}
+                onCreated={(id, name) => {
+                  setNewRange(false);
+                  if (id) set({ scheduleId: id });
+                  else setPendingRange(name);
+                }}
+              />
             </Section>
 
             {/* ───────────── 802.11 rate control ───────────── */}
