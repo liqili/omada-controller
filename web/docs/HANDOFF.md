@@ -163,6 +163,7 @@ rows below were probed with the wrong name; their 10-row results were the defaul
 | `log/nums` | GET ✅ | `{totalNum, limitNum}`. |
 | `logs/notification`, `sites/{sid}/logs/notification` | GET ✅ | Per-event email/webhook notification matrix. Not used by the UI yet. |
 | `current/user-detail` | GET ✅ | Signed-in account. |
+| `account/users` · `roles-available` · `account/users/{id}/sites` · `cmd/users/{id}/confirm` · `users/{id}` | GET/POST/PATCH/DELETE (from the vendor Admin page, **not yet tried live**) | Accounts page (2026-11-16). Add `POST account/users {type:0, name, password, email?, roleId, privilege:{all, sites}, alert}`; edit `PATCH account/users/{id}` with the row minus id/roleName/customerRoleName (+ `password` only when changed, + `token` from `cmd/users/{id}/confirm {password}` when editing yourself); `-30135` = role change moves its accounts to root, confirmed by resending `forceModify:true`; delete `DELETE users/{id} {forceDelete:true}`. `privilege.sites` lists every site when `all`. Main admin (`master_admin_id`) and yourself can't be deleted; cloud accounts (type 1) and pending invites aren't editable. Bodies in `api/domains/admin.ts` + `admin.test.ts`. |
 | `sites/{sid}/alerts/num` | GET ✅ | `{result:{alertNum:0}}` — use for dashboard badge. |
 | `webhook/setting` | GET ✅ | `{result:{webhookSettings:[]}}`. Write verb unknown. |
 | `hotspot/sites/{sid}/vouchers?currentPage=1&currentPageSize=10` | GET ✅ | Voucher grid (empty). |
@@ -239,7 +240,7 @@ All pages below render against the live controller with no console errors
 | `/rf-planning` | `RfPlanningPage` | Toggles save via `rfPlanning/config` (the code had regressed to the root path — fixed). |
 | `/site` | `SiteSettingsPage` | Site name/time zone, LEDs, auto-upgrade, LLDP, mesh, roaming, band steering, airtime fairness, beacon control, remote log, alert email, speed test; device account read-only. Saves only the edited sections via PATCH `setting`. |
 | `/settings` | `SettingsPage` | All `controller/setting` sections (general/NTP, ports+hostname, mail server, RADIUS, device management). Full-object PATCH minus certificate. |
-| `/accounts` | `UsersPage` | Read-only. |
+| `/accounts` | `UsersPage` + `AccountDialog` | List, add, edit (role, sites, alert email, password; your own password asked when editing yourself), delete. |
 | `/upgrades` | `UpgradesPage` | Read-only: policy, device firmware, uploaded files. |
 
 Shared pieces: `components/SettingsKit.tsx` (`ResourceCard` = load/draft/save one
@@ -391,8 +392,9 @@ it — the earlier guesses in the UI were wrong and are fixed:
    forwarding.
 3. **Portals** — list works; create/edit body on `setting/portals/{id}` still
    unknown (`static/modules/settings/authentication/portal`).
-4. **Accounts CRUD** — SPA paths: `POST /api/v2/users`, `/api/v2/users/{id}`,
-   `/api/v2/cmd/users/…` (`static/modules/admin`). Read-only until verified.
+4. **Accounts** — add/edit/delete built from the vendor Admin page (§ API
+   table); try each once on a real controller. Not done: inviting cloud
+   (TP-Link ID) accounts, custom roles.
 5. **SSID extras** — done (§6a). Still missing: creating rate-limit profiles,
    time ranges, MAC groups and PPSK profiles from inside the editor (the
    vendor has "create new" shortcuts; here they must exist already).

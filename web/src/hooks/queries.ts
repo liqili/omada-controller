@@ -35,7 +35,20 @@ import {
   type Ssid,
 } from '../api/domains/wlan';
 import { listLogs, getAlertNum, getLogNums, type LogKind, type LogQuery } from '../api/domains/logs';
-import { listUsers, getCurrentUser, listFirmwares, listVouchers } from '../api/domains/admin';
+import {
+  listUsers,
+  getCurrentUser,
+  listFirmwares,
+  listVouchers,
+  listAvailableRoles,
+  getAccountSites,
+  addAccount,
+  editAccount,
+  deleteAccount,
+  confirmOwnPassword,
+  type AccountInput,
+  type ControllerUser,
+} from '../api/domains/admin';
 import {
   getRfPlanning,
   putRfPlanningConfig,
@@ -363,6 +376,62 @@ export function useUsers() {
 
 export function useCurrentUser() {
   return useQuery({ queryKey: ['currentUser'], queryFn: getCurrentUser, retry: false });
+}
+
+export function useAvailableRoles(enabled = true) {
+  return useQuery({ queryKey: ['rolesAvailable'], queryFn: listAvailableRoles, enabled, retry: false });
+}
+
+export function useAccountSites(userId: string | undefined) {
+  return useQuery({
+    queryKey: ['accountSites', userId],
+    queryFn: () => getAccountSites(userId!),
+    enabled: Boolean(userId),
+    retry: false,
+  });
+}
+
+function accountsChanged(qc: QueryClient) {
+  qc.invalidateQueries({ queryKey: ['users'] });
+  qc.invalidateQueries({ queryKey: ['accountSites'] });
+  qc.invalidateQueries({ queryKey: ['currentUser'] });
+}
+
+export function useAddAccount() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ input, allSiteIds }: { input: AccountInput; allSiteIds: string[] }) => addAccount(input, allSiteIds),
+    onSuccess: () => accountsChanged(qc),
+  });
+}
+
+/** Edit; for your own account pass `ownPassword` (checked first, as the vendor UI does). */
+export function useEditAccount() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      user,
+      input,
+      allSiteIds,
+      ownPassword,
+      forceModify,
+    }: {
+      user: ControllerUser;
+      input: AccountInput;
+      allSiteIds: string[];
+      ownPassword?: string;
+      forceModify?: boolean;
+    }) => {
+      const token = ownPassword ? await confirmOwnPassword(user.id, ownPassword) : undefined;
+      await editAccount(user, input, allSiteIds, { token, forceModify });
+    },
+    onSuccess: () => accountsChanged(qc),
+  });
+}
+
+export function useDeleteAccount() {
+  const qc = useQueryClient();
+  return useMutation({ mutationFn: deleteAccount, onSuccess: () => accountsChanged(qc) });
 }
 
 export function useFirmwares() {
