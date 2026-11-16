@@ -60,6 +60,7 @@ import { getInitialization } from '../api/domains/auth';
 import {
   getApDetail,
   getChannelInfo,
+  getWlanSsids,
   saveApConfig,
   getFirmwareInfo,
   getOnlineUpgradeStatus,
@@ -227,7 +228,10 @@ export function useWlanGroups(siteId: string | undefined) {
 
 export function useWlanGroupMutations(siteId: string | undefined) {
   const qc = useQueryClient();
-  const onSuccess = () => qc.invalidateQueries({ queryKey: ['wlanGroups', siteId] });
+  const onSuccess = () => {
+    qc.invalidateQueries({ queryKey: ['wlanGroups', siteId] });
+    qc.invalidateQueries({ queryKey: ['wlanSsids', siteId] });
+  };
   return {
     create: useMutation({
       mutationFn: (name: string) => (siteId ? createWlanGroup(siteId, name) : noSite()),
@@ -255,7 +259,10 @@ export function useSsids(siteId: string | undefined, wlanId: string | undefined)
 
 export function useSsidMutations(siteId: string | undefined, wlanId: string | undefined) {
   const qc = useQueryClient();
-  const onSuccess = () => qc.invalidateQueries({ queryKey: ['ssids', siteId] });
+  const onSuccess = () => {
+    qc.invalidateQueries({ queryKey: ['ssids', siteId] });
+    qc.invalidateQueries({ queryKey: ['wlanSsids', siteId] });
+  };
   const ready = siteId && wlanId;
   return {
     save: useMutation({
@@ -517,6 +524,14 @@ export function useChannelInfo(siteId: string | undefined, mac: string | undefin
     queryFn: () => getChannelInfo(siteId!, mac!),
     enabled: Boolean(siteId && mac && enabled),
     staleTime: 5 * 60_000,
+  });
+}
+
+export function useWlanSsids(siteId: string | undefined, wirelessRouter = false) {
+  return useQuery({
+    queryKey: ['wlanSsids', siteId, wirelessRouter],
+    queryFn: () => getWlanSsids(siteId!, wirelessRouter),
+    enabled: Boolean(siteId),
   });
 }
 

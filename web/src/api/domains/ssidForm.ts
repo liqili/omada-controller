@@ -587,7 +587,7 @@ export function serializeSsid(f: SsidForm, ctx: SsidFormContext): Ssid {
       d.ppskSetting = undefined;
       if (f.security === SEC.PPSK) d.ppskSetting = { ppskProfileId: f.ppskId };
       else if (f.security === SEC.PPSK_RADIUS) {
-        d.ppskSetting = { radiusProfileId: f.radiusProfileId, nasId: f.ppskNasId, type: f.ppskType, macFormat: f.macFormat };
+        d.ppskSetting = { radiusProfileId: f.radiusProfileId, nasId: f.ppskNasId.trim(), type: f.ppskType, macFormat: f.macFormat };
         if (f.builtInRadius) d.ppskSetting.ppskProfileId = f.ppskId;
       } else {
         d.hidePwd = f.hidePwd;
@@ -598,7 +598,7 @@ export function serializeSsid(f: SsidForm, ctx: SsidFormContext): Ssid {
       d.wpaSetting ??= { radiusProfileId: '', encryptionEnt: ENC.AES, versionEnt: WPA.WPA2, gikRekeyEnable: false, mode: NAS_MODE.DEFAULT };
       d.wpaSetting.radiusProfileId = f.radiusProfileId;
       d.wpaSetting.mode = f.wpaNasMode;
-      d.wpaSetting.nasId = f.wpaNasMode === NAS_MODE.CUSTOM ? f.wpaNasId : undefined;
+      d.wpaSetting.nasId = f.wpaNasMode === NAS_MODE.CUSTOM ? f.wpaNasId.trim() : undefined;
       d.pskSetting = undefined;
       d.ppskSetting = undefined;
       break;
@@ -744,18 +744,19 @@ export function validateSsidForm(f: SsidForm, ctx: SsidFormContext): Record<stri
     const k = f.securityKey;
     if (!k) e.securityKey = 'Enter a password.';
     else if (k.length < 8 || k.length > 63) e.securityKey = 'The password must be 8–63 characters.';
-    else if (!PSK_CHARS.test(k) || /^\s|\s$/.test(k)) e.securityKey = 'Use printable ASCII without leading or trailing spaces.';
+    // Vendor `pskPassword`: printable ASCII, spaces anywhere included.
+    else if (!PSK_CHARS.test(k)) e.securityKey = 'Use printable ASCII characters only.';
   }
   if ((f.security === SEC.ENTERPRISE || f.security === SEC.PPSK_RADIUS) && !f.radiusProfileId) {
     e.radiusProfileId = 'Pick a RADIUS profile.';
   }
   if (f.security === SEC.ENTERPRISE && f.wpaNasMode === NAS_MODE.CUSTOM) {
-    if (!f.wpaNasId) e.wpaNasId = 'Enter a NAS ID.';
-    else if (utf8Len(f.wpaNasId) > 64) e.wpaNasId = 'At most 64 bytes.';
+    if (!f.wpaNasId.trim()) e.wpaNasId = 'Enter a NAS ID.';
+    else if (utf8Len(f.wpaNasId.trim()) > 64) e.wpaNasId = 'At most 64 bytes.';
   }
   if (f.security === SEC.PPSK_RADIUS) {
-    if (f.ppskType === PPSK_AUTH.EKMS && !f.ppskNasId) e.ppskNasId = 'Enter a NAS ID.';
-    else if (utf8Len(f.ppskNasId) > 64) e.ppskNasId = 'At most 64 bytes.';
+    if (f.ppskType === PPSK_AUTH.EKMS && !f.ppskNasId.trim()) e.ppskNasId = 'Enter a NAS ID.';
+    else if (utf8Len(f.ppskNasId.trim()) > 64) e.ppskNasId = 'At most 64 bytes.';
   }
   if ((f.security === SEC.PPSK || (f.security === SEC.PPSK_RADIUS && f.builtInRadius)) && !f.ppskId) {
     e.ppskId = 'Pick a PPSK profile.';
@@ -792,6 +793,19 @@ export function validateSsidForm(f: SsidForm, ctx: SsidFormContext): Record<stri
   const mlo = f.mloEnable ? mloBlocker(f, ctx) : null;
   if (mlo) e.mloEnable = mlo;
   return e;
+}
+
+/**
+ * A RADIUS profile that cannot serve this security mode (vendor
+ * `radiusProfileItemIsDisabled`): several auth/accounting servers work only
+ * with WPA-Enterprise, and a domain-name server only with PPSK + RADIUS.
+ */
+export function radiusProfileDisabled(
+  p: { authServer?: unknown[]; acctServer?: unknown[]; domainEnable?: boolean },
+  security: number,
+): boolean {
+  const multi = (p.authServer?.length ?? 0) > 1 || (p.acctServer?.length ?? 0) > 1;
+  return (security !== SEC.ENTERPRISE && multi) || (Boolean(p.domainEnable) && security !== SEC.PPSK_RADIUS);
 }
 
 /** OWE counts as two SSIDs per 2.4/5 GHz band (vendor `oweLimited`). */

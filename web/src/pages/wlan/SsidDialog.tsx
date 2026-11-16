@@ -54,6 +54,7 @@ import {
   mloBlocker,
   oweLimited,
   pmfRule,
+  radiusProfileDisabled,
   securityOptions,
   serializeSsid,
   show11r,
@@ -336,11 +337,18 @@ export default function SsidDialog({
       { max2g: limits?.maxSsids2G ?? 8, max5g: limits?.maxSsids5G ?? 8 },
       row,
     );
-  const radiusOpts = L.radiusProfiles.map((p) => {
-    const multi = (p.authServer?.length ?? 0) > 1 || (p.acctServer?.length ?? 0) > 1;
-    const disabled = (f.security !== SEC.ENTERPRISE && multi) || (Boolean(p.domainEnable) && f.security !== SEC.PPSK_RADIUS);
-    return { value: p.radiusProfileId, label: p.name, disabled };
-  });
+  const radiusOpts = L.radiusProfiles.map((p) => ({
+    value: p.radiusProfileId,
+    label: p.name,
+    disabled: radiusProfileDisabled(p, f.security),
+  }));
+  // Vendor: a selected RADIUS profile the new security mode can't use is cleared.
+  const setSecurity = (security: number) => {
+    const p = L.radiusProfiles.find((x) => x.radiusProfileId === f.radiusProfileId);
+    set(p && radiusProfileDisabled(p, security) ? { security, radiusProfileId: '', builtInRadius: false } : { security });
+  };
+  // Vendor: OWE is switched off once the SSID entries it needs are not there.
+  const oweOn = f.oweEnable && !oweBlocked;
   const ppskType = f.security === SEC.PPSK ? 0 : 1;
   const ppskOpts = L.ppskProfiles.filter((p) => p.type === ppskType).map((p) => ({ value: p.id, label: p.profileName }));
   const showPpskProfile = f.security === SEC.PPSK || (f.security === SEC.PPSK_RADIUS && f.builtInRadius);
@@ -350,7 +358,7 @@ export default function SsidDialog({
   const submit = () => {
     setTouched(true);
     if (Object.keys(errors).length) return;
-    onSave(serializeSsid({ ...f, builtInRadius: f.builtInRadius && f.security === SEC.PPSK_RADIUS }, ctx));
+    onSave(serializeSsid({ ...f, oweEnable: oweOn, builtInRadius: f.builtInRadius && f.security === SEC.PPSK_RADIUS }, ctx));
   };
 
   const rateSummary = (id: string) => (id === CUSTOM ? 'Custom' : (L.rateLimits.find((p) => p.id === id)?.name ?? 'Profile'));
@@ -452,7 +460,7 @@ export default function SsidDialog({
           <Select
             label="Security"
             value={f.security}
-            onChange={(v) => set({ security: v })}
+            onChange={setSecurity}
             options={secOpts}
           />
 
@@ -464,8 +472,8 @@ export default function SsidDialog({
                   ? 'Not enough SSID entries left: an OWE SSID counts twice on 2.4 GHz and 5 GHz.'
                   : 'Encrypts traffic with Opportunistic Wireless Encryption; older firmware falls back to open.'
               }
-              checked={f.oweEnable}
-              disabled={oweBlocked && !f.oweEnable}
+              checked={oweOn}
+              disabled={oweBlocked}
               onChange={(v) => set({ oweEnable: v })}
             />
           )}
@@ -526,7 +534,7 @@ export default function SsidDialog({
                   size="small"
                   label="Custom NAS ID"
                   value={f.wpaNasId}
-                  onChange={(e) => set({ wpaNasId: e.target.value.trim() })}
+                  onChange={(e) => set({ wpaNasId: e.target.value })}
                   fullWidth
                   sx={{ mt: 1.5 }}
                   error={Boolean(shown.wpaNasId)}
@@ -564,7 +572,7 @@ export default function SsidDialog({
                 size="small"
                 label={f.ppskType === PPSK_AUTH.EKMS ? 'NAS ID' : 'NAS ID (optional)'}
                 value={f.ppskNasId}
-                onChange={(e) => set({ ppskNasId: e.target.value.trim() })}
+                onChange={(e) => set({ ppskNasId: e.target.value })}
                 fullWidth
                 error={Boolean(shown.ppskNasId)}
                 helperText={shown.ppskNasId ?? 'Up to 64 bytes'}

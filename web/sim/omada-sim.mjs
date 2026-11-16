@@ -165,16 +165,22 @@ const RADIO_OF_BAND = { '2.4 GHz': 'radioSetting2g', '5 GHz': 'radioSetting5g' }
 // `value` (an index), not the channel number `channelValue`; the label is
 // channelName "36 / 5180MHz". Indexes deliberately differ from channel
 // numbers so mixing the two up shows.
-const channelEntry = (c, i, freq) => ({ value: i + 1, channelValue: c, channelName: `${c} / ${freq}MHz`, freq });
+// widthFlag bits as the controller sends them: 20 MHz 65536, 40 MHz
+// 131072|262144, and base 256 plus 80 MHz 8388608 / 160 MHz 16777216.
+const W20 = 65536, W40 = 131072 | 262144, W80 = 256 | 8388608, W160 = 256 | 16777216;
+const channelEntry = (c, i, freq, widthFlag) => ({ value: i + 1, channelValue: c, channelName: `${c} / ${freq}MHz`, freq, widthFlag });
 const CHANNELS = {
-  0: Array.from({ length: 13 }, (_, i) => channelEntry(i + 1, i + 100, 2412 + 5 * i)),
-  1: [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140].map((c, i) => channelEntry(c, i, 5000 + 5 * c)),
+  0: Array.from({ length: 13 }, (_, i) => channelEntry(i + 1, i + 100, 2412 + 5 * i, W20 | W40)),
+  // 36–128 sit in 160 MHz blocks; 132–140 reach only 80 MHz.
+  1: [36, 40, 44, 48, 52, 56, 60, 64, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140].map((c, i) =>
+    channelEntry(c, i, 5000 + 5 * c, W20 | W40 | W80 | (c <= 128 ? W160 : 0)),
+  ),
 };
 /** Channel number for a radioSetting.channel value; auto ("0") settles on the first channel. */
 const channelNumber = (radioId, value) =>
   value === '0' || value === undefined ? CHANNELS[radioId][0].channelValue : CHANNELS[radioId].find((c) => String(c.value) === String(value))?.channelValue;
-const WIDTHS = { radioSetting2g: ['2', '3', '4'], radioSetting5g: ['2', '3', '5', '6'] };
-const WIDTH_TEXT = { 2: '20 MHz', 3: '40 MHz', 4: '20/40 MHz', 5: '80 MHz', 6: '20/40/80 MHz' };
+const WIDTHS = { radioSetting2g: ['2', '3', '4'], radioSetting5g: ['2', '3', '5', '6', '7'] };
+const WIDTH_TEXT = { 2: '20 MHz', 3: '40 MHz', 4: '20/40 MHz', 5: '80 MHz', 6: '20/40/80 MHz', 7: '160 MHz' };
 const POWER_TEXT = { 0: 'low', 1: 'medium', 2: 'high', 4: 'auto' };
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 

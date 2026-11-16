@@ -9,6 +9,7 @@ import {
   formFromSsid,
   mloBlocker,
   pmfRule,
+  radiusProfileDisabled,
   serializeSsid,
   validateSsidForm,
   wpaOptions,
@@ -270,5 +271,34 @@ describe('validateSsidForm', () => {
     const f = formFromSsid(add);
     Object.assign(f, { name: 'x'.repeat(33), securityKey: 'short', gikRekeyEnable: true, rekeyInterval: 10, vlanMode: 1, customMode: 1, vlanId: 5000 });
     expect(Object.keys(validateSsidForm(f, add)).sort()).toEqual(['name', 'rekeyInterval', 'securityKey', 'vlanId']);
+  });
+});
+
+describe('vendor parity fixes', () => {
+  it('accepts a password with leading or trailing spaces, as the vendor form does', () => {
+    const f = newForm();
+    f.securityKey = ' pass word ';
+    expect(validateSsidForm(f, add)).toEqual({});
+    f.securityKey = 'pässword1';
+    expect(validateSsidForm(f, add).securityKey).toBeTruthy();
+  });
+
+  it('keeps spaces inside a NAS ID and trims only the ends when saving', () => {
+    const f = newForm();
+    Object.assign(f, { security: SEC.ENTERPRISE, radiusProfileId: 'r1', wpaNasMode: 2, wpaNasId: '  ap lobby ' });
+    expect(validateSsidForm(f, add).wpaNasId).toBeUndefined();
+    expect((serializeSsid(f, add).wpaSetting as Record<string, unknown>).nasId).toBe('ap lobby');
+    f.wpaNasId = '   ';
+    expect(validateSsidForm(f, add).wpaNasId).toBeTruthy();
+  });
+
+  it('marks RADIUS profiles the security mode cannot use', () => {
+    const multi = { authServer: [1, 2] };
+    const domain = { domainEnable: true };
+    expect(radiusProfileDisabled(multi, SEC.ENTERPRISE)).toBe(false);
+    expect(radiusProfileDisabled(multi, SEC.PPSK_RADIUS)).toBe(true);
+    expect(radiusProfileDisabled(domain, SEC.PPSK_RADIUS)).toBe(false);
+    expect(radiusProfileDisabled(domain, SEC.ENTERPRISE)).toBe(true);
+    expect(radiusProfileDisabled({ authServer: [1] }, SEC.PPSK_RADIUS)).toBe(false);
   });
 });

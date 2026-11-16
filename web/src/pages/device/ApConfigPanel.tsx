@@ -1,6 +1,29 @@
 import { useMemo, useState } from 'react';
-import { Alert, CircularProgress, MenuItem, Stack, TextField, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material';
-import { useApDetail, useChannelInfo, useSaveApConfig, useWlanGroups } from '../../hooks/queries';
+import {
+  Alert,
+  Button,
+  CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  IconButton,
+  InputAdornment,
+  List,
+  ListItem,
+  ListItemText,
+  MenuItem,
+  Stack,
+  Switch,
+  TextField,
+  ToggleButton,
+  ToggleButtonGroup,
+  Typography,
+} from '@mui/material';
+import EditIcon from '@mui/icons-material/Edit';
+import VisibilityIcon from '@mui/icons-material/Visibility';
+import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
+import { useApDetail, useChannelInfo, useSaveApConfig, useWlanGroups, useWlanSsids } from '../../hooks/queries';
 import { NumberField, SaveBar, SectionCard, Toast, ToggleRow, apiErrorText, useDraft } from '../../components/SettingsKit';
 import {
   FOLLOW_SITE,
@@ -10,8 +33,13 @@ import {
   RADIO_LABEL,
   WIDTH_LABEL,
   channelOptionValue,
+  channelsForWidth,
+  overrideProblems,
+  overridesForGroup,
+  serializeOverride,
   supportedRadios,
   widthOptions,
+  type SsidOverride,
   type ApConfigSection,
   type ApDetail,
   type ApRadioSetting,
@@ -100,9 +128,18 @@ function RadioCard({ ap, radio, siteId, toast }: { ap: ApDetail; radio: RadioKey
   const channels = useChannelInfo(siteId, ap.mac);
   const d = s.draft;
   if (!d) return null;
-  const list = channels.data?.[RADIO_ID[radio]] ?? [];
+  const allChannels = channels.data?.[RADIO_ID[radio]] ?? [];
   const custom = d.txPowerLevel === POWER_CUSTOM;
-  const widths = widthOptions(radio);
+  const widths = widthOptions(radio, allChannels, {
+    wirelessMode: d.wirelessMode,
+    support11ac: ap.deviceMisc?.support11ac as boolean | undefined,
+  });
+  const list = channelsForWidth(radio, allChannels, d.channelWidth ?? widths[0]);
+  // A channel that can't run at the new width falls back to Auto, as in the vendor form.
+  const setWidth = (w: string) => {
+    const fits = channelsForWidth(radio, allChannels, w).some((c) => channelOptionValue(c) === d.channel);
+    s.set(d.channel && d.channel !== '0' && allChannels.length && !fits ? { channelWidth: w, channel: '0' } : { channelWidth: w });
+  };
   return (
     <SectionCard title={`Radio ${RADIO_LABEL[radio]}`}>
       <ToggleRow label="Radio on" checked={d.radioEnable !== false} onChange={(v) => s.set({ radioEnable: v })} />
@@ -112,7 +149,7 @@ function RadioCard({ ap, radio, siteId, toast }: { ap: ApDetail; radio: RadioKey
           size="small"
           label="Channel width"
           value={d.channelWidth ?? widths[0]}
-          onChange={(e) => s.set({ channelWidth: e.target.value })}
+          onChange={(e) => setWidth(e.target.value)}
           disabled={d.radioEnable === false}
           sx={{ minWidth: 180 }}
         >
@@ -193,12 +230,119 @@ function RadioCard({ ap, radio, siteId, toast }: { ap: ApDetail; radio: RadioKey
   );
 }
 
+const BAND_NAMES = ['2.4 GHz', '5 GHz', '6 GHz'];
+
+function OverrideDialog({
+  row,
+  all,
+  onClose,
+  onDone,
+}: {
+  row: SsidOverride;
+  all: SsidOverride[];
+  onClose: () => void;
+  onDone: (o: SsidOverride) => void;
+}) {
+  const [o, setO] = useState<SsidOverride>(() => ({
+    ...row,
+    psk: row.hidePwd && !row.psk ? '012345678912' : row.psk,
+  }));
+  const [touched, setTouched] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+  const errors = overrideProblems(o, all);
+  const shown = touched ? errors : {};
+  const set = (p: Partial<SsidOverride>) => setO((x) => ({ ...x, ...p }));
+  return (
+    <Dialog open onClose={onClose} fullWidth maxWidth="xs">
+      <DialogTitle>Override {row.globalSsid}</DialogTitle>
+      <DialogContent dividers>
+        <Stack spacing={2}>
+          <ToggleRow
+            label="Override on this access point"
+            hint="Turn off to use the SSID's own settings."
+            checked={o.enable}
+            onChange={(v) => set({ enable: v })}
+          />
+          <TextField
+            size="small"
+            label="SSID"
+            value={o.ssid}
+            disabled={!o.enable}
+            onChange={(e) => set({ ssid: e.target.value })}
+            error={Boolean(shown.ssid)}
+            helperText={shown.ssid ?? 'Up to 32 bytes'}
+          />
+          {o.security === 3 && (
+            <TextField
+              size="small"
+              label="Password"
+              type={showKey ? 'text' : 'password'}
+              value={o.psk ?? ''}
+              disabled={!o.enable || o.hidePwd}
+              onChange={(e) => set({ psk: e.target.value })}
+              autoComplete="new-password"
+              error={Boolean(shown.psk)}
+              helperText={shown.psk ?? (o.hidePwd ? 'The password is hidden and is kept as it is.' : '8–63 characters')}
+              InputProps={{
+                endAdornment:
+                  o.hidePwd || !o.enable ? undefined : (
+                    <InputAdornment position="end">
+                      <IconButton edge="end" onClick={() => setShowKey((v) => !v)} aria-label={showKey ? 'Hide password' : 'Show password'}>
+                        {showKey ? <VisibilityOffIcon /> : <VisibilityIcon />}
+                      </IconButton>
+                    </InputAdornment>
+                  ),
+              }}
+            />
+          )}
+          <ToggleRow label="VLAN" checked={o.vlanEnable} disabled={!o.enable} onChange={(v) => set({ vlanEnable: v })} />
+          <NumberField
+            label="VLAN ID"
+            value={o.vlanId}
+            disabled={!o.enable || !o.vlanEnable}
+            onChange={(v) => set({ vlanId: v })}
+            error={Boolean(shown.vlanId)}
+            helperText={shown.vlanId ?? '1–4094'}
+          />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose}>Cancel</Button>
+        <Button
+          variant="contained"
+          onClick={() => {
+            setTouched(true);
+            if (!Object.keys(errors).length) onDone(o);
+          }}
+        >
+          Done
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
 function WlanCard({ ap, siteId, toast }: { ap: ApDetail; siteId: string; toast: (m: string) => void }) {
   const groups = useWlanGroups(siteId);
-  const init = useMemo(() => ({ wlanId: ap.wlanId ?? '' }), [ap]);
+  const wlanSsids = useWlanSsids(siteId, Boolean(ap.wirelessRouter));
+  const init = useMemo(
+    () => ({ wlanId: ap.wlanId ?? '', ssidOverrides: overridesForGroup(ap, ap.wlanId ?? '', []) }),
+    [ap],
+  );
   const s = useSection(init, 'wlans', siteId, ap.mac);
+  const [editing, setEditing] = useState<SsidOverride | null>(null);
   const d = s.draft;
   if (!d) return null;
+  const rows = d.ssidOverrides;
+  const setRow = (o: SsidOverride) => s.set({ ssidOverrides: rows.map((r) => (r.index === o.index ? o : r)) });
+  const pickGroup = (wlanId: string) => s.set({ wlanId, ssidOverrides: overridesForGroup(ap, wlanId, wlanSsids.data ?? []) });
+  // Vendor: an AP without OUI MAC filtering is warned before it broadcasts an SSID that uses one.
+  const ouiSsids = new Set(
+    (wlanSsids.data?.find((g) => g.wlanId === d.wlanId)?.ssids ?? []).filter((x) => x.ouiMacFilterEnable).map((x) => x.idInt),
+  );
+  const ouiWarn =
+    !ap.addedInAdvanced && !ap.deviceMisc?.supportOuiMacFilter && rows.some((r) => r.ssidEnable && ouiSsids.has(r.index));
+  const invalid = rows.some((r) => Object.keys(overrideProblems(r, rows)).length > 0);
   return (
     <SectionCard title="Wireless networks" subtitle="The WLAN group decides which SSIDs this access point broadcasts.">
       <TextField
@@ -206,8 +350,10 @@ function WlanCard({ ap, siteId, toast }: { ap: ApDetail; siteId: string; toast: 
         size="small"
         label="WLAN group"
         value={d.wlanId}
-        onChange={(e) => s.set({ wlanId: e.target.value })}
+        onChange={(e) => pickGroup(e.target.value)}
         sx={{ maxWidth: 320 }}
+        disabled={wlanSsids.isLoading}
+        helperText={wlanSsids.error ? `Couldn't load the groups' SSIDs: ${apiErrorText(wlanSsids.error)}` : undefined}
       >
         {(groups.data?.groups ?? []).map((g) => (
           <MenuItem key={g.id} value={g.id}>
@@ -216,14 +362,68 @@ function WlanCard({ ap, siteId, toast }: { ap: ApDetail; siteId: string; toast: 
           </MenuItem>
         ))}
       </TextField>
+      {rows.length === 0 ? (
+        <Typography variant="body2" color="text.secondary">
+          No SSIDs in this group that this access point can broadcast.
+        </Typography>
+      ) : (
+        <List dense disablePadding sx={{ border: 1, borderColor: 'divider', borderRadius: 1 }}>
+          {rows.map((r, i) => (
+            <ListItem
+              key={r.index}
+              divider={i < rows.length - 1}
+              secondaryAction={
+                <Stack direction="row" alignItems="center" spacing={0.5}>
+                  <IconButton size="small" aria-label={`Override ${r.globalSsid}`} onClick={() => setEditing(r)}>
+                    <EditIcon fontSize="small" />
+                  </IconButton>
+                  <Switch
+                    checked={r.ssidEnable}
+                    onChange={(e) => setRow({ ...r, ssidEnable: e.target.checked })}
+                    inputProps={{ 'aria-label': `Broadcast ${r.globalSsid} on this access point` }}
+                  />
+                </Stack>
+              }
+              sx={{ pr: 12 }}
+            >
+              <ListItemText
+                primary={r.globalSsid}
+                secondary={[
+                  (r.supportBands ?? []).map((b) => BAND_NAMES[b]).join(', '),
+                  r.enable ? `Overridden${r.ssid.trim() !== r.globalSsid ? ` as “${r.ssid.trim()}”` : ''}${r.vlanEnable ? ` · VLAN ${r.vlanId}` : ''}` : null,
+                  r.ssidEnable ? null : 'Off on this access point',
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              />
+            </ListItem>
+          ))}
+        </List>
+      )}
+      {ouiWarn && (
+        <Alert severity="warning">
+          This access point does not support OUI-based MAC filtering, so an enabled SSID that uses it won't filter clients here.
+        </Alert>
+      )}
       {s.save.isError && <Alert severity="error">{apiErrorText(s.save.error)}</Alert>}
       <SaveBar
         dirty={s.dirty}
         saving={s.save.isPending}
-        disabled={!d.wlanId}
+        disabled={!d.wlanId || invalid}
         onReset={s.reset}
-        onSave={() => s.submit({ wlanId: d.wlanId, ssidOverrides: [] }, toast)}
+        onSave={() => s.submit({ wlanId: d.wlanId, ssidOverrides: rows.map(serializeOverride) }, toast)}
       />
+      {editing && (
+        <OverrideDialog
+          row={editing}
+          all={rows}
+          onClose={() => setEditing(null)}
+          onDone={(o) => {
+            setRow(o);
+            setEditing(null);
+          }}
+        />
+      )}
     </SectionCard>
   );
 }

@@ -49,10 +49,122 @@ export const WIDTH_LABEL: Record<string, string> = {
   '9': '240 MHz',
   '10': '320 MHz',
 };
-export function widthOptions(radio: RadioKey): string[] {
-  if (radio === 'radioSetting2g') return ['4', '2', '3'];
-  if (radio === 'radioSetting6g') return ['8', '2', '3', '5', '7'];
-  return ['6', '2', '3', '5'];
+/** The band's Auto width code (vendor getAutoOptValue). */
+export const AUTO_WIDTH: Record<RadioKey, string> = { radioSetting2g: '4', radioSetting5g: '6', radioSetting5g2: '6', radioSetting6g: '8' };
+
+// channelInfo widthFlag bits (vendor ap_settings/configuration). 80 MHz and
+// wider need the BASE bit as well.
+const BIT = { w20: 65536, w40a: 131072, w40b: 262144, base: 256, w80: 8388608, w160: 16777216, w240: 67108864, w320: 33554432 };
+const both = (flag: number, bit: number) => (flag & (BIT.base | bit)) === (BIT.base | bit);
+const hasWidthFlags = (channels: ChannelOption[]) => channels.some((c) => c.widthFlag !== undefined && c.widthFlag !== null);
+/** Whether a channel can run at a width code ("0"/Auto channels always can). */
+function channelFits(c: ChannelOption, width: string): boolean {
+  const f = Number(c.widthFlag) || 0;
+  switch (width) {
+    case '2':
+      return (f & BIT.w20) !== 0;
+    case '3':
+      return (f & (BIT.w40a | BIT.w40b)) !== 0;
+    case '5':
+      return both(f, BIT.w80);
+    case '7':
+      return both(f, BIT.w160);
+    case '9':
+      return both(f, BIT.w240);
+    case '10':
+      return both(f, BIT.w320);
+    default:
+      return true;
+  }
+}
+
+/**
+ * Widths a wireless mode allows, per band (vendor support map, indexed by
+ * wirelessMode 0–19; 6 GHz mode 11 behaves like 14). Only applied when the
+ * radio has a fixed mode — Auto (-2) or unset offers every width.
+ */
+const T = true;
+const F = false;
+const MODE_WIDTHS: Record<'2g' | '5g' | '6g', Record<string, boolean[]>> = {
+  '2g': {
+    '2': [T, T, T, T, T, F, F, F, F, F, F, T, T, T, F, F, F, T, F, F],
+    '3': [F, F, T, F, T, F, F, F, F, F, F, T, T, T, F, F, F, T, F, F],
+  },
+  '5g': {
+    '2': [F, F, F, F, F, T, T, T, T, T, T, F, F, F, T, T, T, F, T, F],
+    '3': [F, F, F, F, F, F, T, T, T, T, T, F, F, F, T, T, T, F, T, F],
+    '5': [F, F, F, F, F, F, F, F, T, T, T, F, F, F, T, T, T, F, T, F],
+    '7': [F, F, F, F, F, F, F, F, T, T, T, F, F, F, T, T, T, F, T, F],
+    '9': [F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, T, F],
+  },
+  '6g': {
+    '2': [F, F, F, F, F, F, F, F, F, F, F, T, F, F, T, F, F, F, F, T],
+    '3': [F, F, F, F, F, F, F, F, F, F, F, T, F, F, T, F, F, F, F, T],
+    '5': [F, F, F, F, F, F, F, F, F, F, F, T, F, F, T, F, F, F, F, T],
+    '7': [F, F, F, F, F, F, F, F, F, F, F, T, F, F, T, F, F, F, F, T],
+    '10': [F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, F, T],
+  },
+};
+const MODE_BAND: Record<RadioKey, '2g' | '5g' | '6g'> = {
+  radioSetting2g: '2g',
+  radioSetting5g: '5g',
+  radioSetting5g2: '5g',
+  radioSetting6g: '6g',
+};
+
+/**
+ * Channel widths offered for a radio, as the vendor's Config tab builds them
+ * (generateRadioChannelWidthOpt + filterChannelWidthByMode): from what the
+ * AP's channels support (channelInfo widthFlag), so a 5 GHz radio offers
+ * 160 MHz (and 240/320) when its channels can do it. Auto comes first.
+ */
+export function widthOptions(
+  radio: RadioKey,
+  channels: ChannelOption[] = [],
+  opts: { wirelessMode?: number; support11ac?: boolean } = {},
+): string[] {
+  const auto = AUTO_WIDTH[radio];
+  let widths: string[];
+  // No list, or one without widthFlags (older firmware/simulator): the
+  // vendor's no-channel-info defaults, plus 160 MHz on 6 GHz.
+  if (!hasWidthFlags(channels)) {
+    widths =
+      radio === 'radioSetting2g' ? [auto, '2', '3'] : radio === 'radioSetting6g' ? [auto, '2', '3', '5', '7'] : [auto, '2', '3', '5'];
+  } else if (!channels.some((c) => channelFits(c, '3'))) {
+    widths = ['2'];
+  } else {
+    const can = (w: string) => channels.some((c) => channelFits(c, w));
+    const wide =
+      (opts.support11ac !== false && can('5') && radio === 'radioSetting5g') ||
+      radio === 'radioSetting5g2' ||
+      radio === 'radioSetting6g';
+    if (!wide) widths = [auto, '2', '3'];
+    else if (!can('7')) widths = [auto, '2', '3', '5'];
+    else if (can('9')) widths = [auto, '2', '3', '5', '7', '9'];
+    else if (can('10')) widths = [auto, '2', '3', '5', '7', '10'];
+    else widths = [auto, '2', '3', '5', '7'];
+  }
+  const mode = opts.wirelessMode;
+  if (mode === undefined || mode === -2) return widths;
+  const map = MODE_WIDTHS[MODE_BAND[radio]];
+  const idx = radio === 'radioSetting6g' && mode === 11 ? 14 : mode;
+  return widths.filter((w) => w === auto || Boolean(map[w]?.[idx]));
+}
+
+/**
+ * Channels usable at a width (vendor generateNewModelsRadioChannelOpt): a
+ * fixed width keeps the channels whose widthFlag has it; Auto keeps those
+ * that fit every width Auto may pick (up to 80 MHz on 5 GHz). 2.4 GHz isn't
+ * filtered.
+ */
+export function channelsForWidth(radio: RadioKey, channels: ChannelOption[], width: string | undefined): ChannelOption[] {
+  if (radio === 'radioSetting2g' || !width || !hasWidthFlags(channels)) return channels;
+  let need: string[];
+  if (width === AUTO_WIDTH[radio]) {
+    const autoList = widthOptions(radio, channels).filter((w) => w !== AUTO_WIDTH[radio]);
+    need = radio === 'radioSetting6g' ? autoList.filter((w) => w !== '9' && w !== '10') : autoList.filter((w) => Number(w) <= 6);
+  } else need = [width];
+  return channels.filter((c) => channelOptionValue(c) === '0' || need.every((w) => channelFits(c, w)));
 }
 
 /** txPowerLevel codes. */
@@ -154,6 +266,115 @@ export function supportedRadios(ap: ApDetail): RadioKey[] {
     radioSetting6g: misc.support6g,
   };
   return RADIO_KEYS.filter((k) => (flag[k] ?? false) || (misc.support5g === undefined && ap[k] !== undefined));
+}
+
+// — Per-AP SSID overrides (vendor device page "WLANs") —
+
+/** One entry of `ssidOverrides`: the AP's view of one SSID of its WLAN group. */
+export interface SsidOverride {
+  /** The SSID's `idInt`. */
+  index: number;
+  globalSsid: string;
+  /** 0 = 2.4 GHz, 1 = 5 GHz, 2 = 6 GHz (the bands this AP can broadcast it on). */
+  supportBands?: number[];
+  security?: number;
+  /** Override name / password / VLAN on this AP. */
+  enable: boolean;
+  ssid: string;
+  psk?: string;
+  hidePwd?: boolean;
+  vlanEnable: boolean;
+  vlanId?: number;
+  /** Broadcast this SSID on this AP. */
+  ssidEnable: boolean;
+  [k: string]: unknown;
+}
+
+export interface WlanSsidGroup {
+  wlanId: string;
+  wlanName: string;
+  primary?: boolean;
+  ssids: {
+    idInt: number;
+    name: string;
+    bandInfo: number;
+    securityMode: number;
+    psk?: string;
+    hidePwd?: boolean;
+    vlanId?: number;
+    ouiMacFilterEnable?: boolean;
+  }[];
+}
+
+/** GET sites/{sid}/wlanSsid — every WLAN group with the SSIDs an AP override list is built from. */
+export const getWlanSsids = (siteId: string, wirelessRouter: boolean) =>
+  unwrap<WlanSsidGroup[]>(
+    api.get(scoped(`/api/v2/sites/${siteId}/wlanSsid`), { params: { deviceType: wirelessRouter ? 1 : 0 } }),
+  ).then((r) => r ?? []);
+
+/**
+ * The override list to show and save for `wlanId`. The AP's own group keeps
+ * its saved overrides; another group starts from its SSIDs with nothing
+ * overridden, keeping those the AP has a band for (vendor `changeWlanGroup`).
+ */
+export function overridesForGroup(ap: ApDetail, wlanId: string, groups: WlanSsidGroup[]): SsidOverride[] {
+  if (wlanId === ap.wlanId) return ((ap.ssidOverrides as SsidOverride[] | undefined) ?? []).map((o) => ({ ...o }));
+  const radios = supportedRadios(ap);
+  const can = [
+    radios.includes('radioSetting2g'),
+    radios.includes('radioSetting5g') || radios.includes('radioSetting5g2'),
+    radios.includes('radioSetting6g'),
+  ];
+  const group = groups.find((g) => g.wlanId === wlanId);
+  return (group?.ssids ?? []).flatMap((s) => {
+    const supportBands = [0, 1, 2].filter((b) => can[b] && (s.bandInfo & (1 << b)) !== 0);
+    if (!supportBands.length) return [];
+    return [
+      {
+        index: s.idInt,
+        globalSsid: s.name,
+        ssid: s.name,
+        supportBands,
+        security: s.securityMode,
+        psk: s.psk,
+        hidePwd: s.hidePwd,
+        enable: false,
+        vlanEnable: false,
+        vlanId: s.vlanId || 1,
+        ssidEnable: true,
+      },
+    ];
+  });
+}
+
+const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
+const PSK_TEXT = /^[\x20-\x7e]+$/;
+
+/** Field errors for one override (vendor `ssidOverrideModel` rules plus the e39304 name clash). */
+export function overrideProblems(o: SsidOverride, all: SsidOverride[]): Record<string, string> {
+  const e: Record<string, string> = {};
+  if (!o.enable) return e;
+  const name = o.ssid.trim();
+  if (!name) e.ssid = 'Enter an SSID name.';
+  else if (utf8Bytes(name) > 32) e.ssid = 'The SSID name can be at most 32 bytes.';
+  else if (all.some((x) => x.globalSsid === name || (x.index !== o.index && x.enable && x.ssid.trim() === name))) {
+    e.ssid = 'Another SSID already uses this name.';
+  }
+  if (o.security === 3 && !o.hidePwd) {
+    const k = o.psk ?? '';
+    if (k.length < 8 || k.length > 63) e.psk = 'The password must be 8–63 characters.';
+    else if (!PSK_TEXT.test(k)) e.psk = 'Use printable ASCII characters only.';
+    else if (/^\s/.test(k)) e.psk = 'The password cannot start with a space.';
+  }
+  if (o.vlanEnable && !(Number.isInteger(o.vlanId) && o.vlanId! >= 1 && o.vlanId! <= 4094)) e.vlanId = 'VLAN ID must be 1–4094.';
+  return e;
+}
+
+/** The body the vendor saves for one override (name trimmed, hidden password not sent). */
+export function serializeOverride(o: SsidOverride): SsidOverride {
+  const out: SsidOverride = { ...o, ssid: o.ssid.trim() };
+  if (o.hidePwd) delete out.psk;
+  return out;
 }
 
 export type ApConfigSection = 'general' | 'radios' | 'ip-settings' | 'wlans' | 'services';
